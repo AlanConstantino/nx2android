@@ -66,7 +66,7 @@ static int fps_opt_press(int item) { (void)item; return 0; }
 static void ed_open(void) {}
 static void sp_open(void) {}
 static void rm_open(void) {}
-static void qm_open(void) {}
+static void qm_open(int kind) { (void)kind; }
 int dm_qol_available(void) { return 1; }
 int dm_fps_cap_available(void) { return 1; }
 static void fps_cap_apply_mode(int docked) { (void)docked; }

@@ -1,4 +1,5 @@
-"""Check live QoL mods defaults (all OFF), toggle transitions, sanitization, and settings.txt round-trip."""
+"""Check the live QoL mods and map icons (qol_mods.h): defaults (all off), each toggle's values, the two panels' Show all / Hide all / Reset all,
+sanitising, and the settings.txt round trip."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,60 +26,94 @@ class QolMods(unittest.TestCase):
 
 int main(int argc, char **argv) {
     assert(argc == 2);
-    // Defaults: every single mod must start OFF
-    uint32_t f = 0;
-    int g = 0;
-    assert(qol_active_count(f, g) == 0);
-    assert(fabsf(qol_glider_mult(g) - 1.0f) < 1e-6f);
+    // Defaults: every mod starts OFF, the clock and the glider at the game's own
+    qol_state s = {0, 0, 0};
+    assert(qol_active_count(s) == 0);
+    assert(fabsf(qol_glider_mult(s.glider) - 1.0f) < 1e-6f && fabsf(qol_day_mult(s.ext) - 1.0f) < 1e-6f);
     for (int i = 0; i < QOL_ITEM_N; i++) {
-        assert(strcmp(qol_item_value(i, f, g), "Off") == 0);
+        const char *v = qol_item_value(i, s);
+        assert(!strcmp(v, "Off") || !strcmp(v, "Normal"));
     }
+    // The two panels cover every item once: Map icons first, then QoL mods
+    assert(QOL_MAP_FIRST == 0 && QOL_MAP_N == 13 && QOL_MODS_FIRST == QOL_MAP_N && QOL_MODS_FIRST + QOL_MODS_N == QOL_ITEM_N && QOL_MODS_N == 11);
+    for (int i = QOL_MAP_FIRST; i < QOL_MAP_FIRST + QOL_MAP_N; i++) assert(i == QOL_ITEM_KOROK || (qol_item_bit(i) & QOL_MAP_FLAGS) == qol_item_bit(i));
+    for (int i = QOL_MODS_FIRST; i < QOL_ITEM_N; i++) assert(!(qol_item_bit(i) & QOL_MAP_FLAGS));
+    // The stubs' bit numbers (patches.py)
+    assert(QOL_TOWERS == 1u << 11 && QOL_VILLAGES == 1u << 12 && QOL_UNVISITED == 1u << 13 && QOL_FAIRIES == 1u << 14 && QOL_MISKO == 1u << 15);
+    assert(QOL_BARGAINER == 1u << 16 && QOL_OLD_MAPS == 1u << 17 && QOL_TEMPLES == 1u << 18 && QOL_NO_COLD == 1u << 19 && QOL_NO_HEAT == 1u << 20 && QOL_NO_FIRE == 1u << 21);
 
-    // Korok 3-way cycle: Off -> Uncollected -> All -> Off
-    qol_toggle_item(QOL_ITEM_KOROK, &f, &g);
-    assert((f & QOL_KOROK_MASK) == QOL_KOROK_UNCOLLECTED && strcmp(qol_item_value(QOL_ITEM_KOROK, f, g), "*Uncollected") == 0);
-    assert(qol_active_count(f, g) == 1);
-    qol_toggle_item(QOL_ITEM_KOROK, &f, &g);
-    assert((f & QOL_KOROK_MASK) == QOL_KOROK_ALL && strcmp(qol_item_value(QOL_ITEM_KOROK, f, g), "*All") == 0);
-    assert(qol_active_count(f, g) == 1);
-    qol_toggle_item(QOL_ITEM_KOROK, &f, &g);
-    assert((f & QOL_KOROK_MASK) == QOL_KOROK_OFF && strcmp(qol_item_value(QOL_ITEM_KOROK, f, g), "Off") == 0);
-    assert(qol_active_count(f, g) == 0);
+    // Korok: Off -> Uncollected -> All -> Off
+    qol_toggle_item(QOL_ITEM_KOROK, &s);
+    assert((s.flags & QOL_KOROK_MASK) == QOL_KOROK_UNCOLLECTED && !strcmp(qol_item_value(QOL_ITEM_KOROK, s), "*Uncollected"));
+    qol_toggle_item(QOL_ITEM_KOROK, &s);
+    assert((s.flags & QOL_KOROK_MASK) == QOL_KOROK_ALL && !strcmp(qol_item_value(QOL_ITEM_KOROK, s), "*All"));
+    qol_toggle_item(QOL_ITEM_KOROK, &s);
+    assert((s.flags & QOL_KOROK_MASK) == QOL_KOROK_OFF && qol_active_count(s) == 0);
 
-    // Paraglider 3-way cycle: Off (1.0x) -> 1.5x -> 2.0x -> Off (1.0x)
-    qol_toggle_item(QOL_ITEM_GLIDER, &f, &g);
-    assert(g == QOL_GLIDER_15 && fabsf(qol_glider_mult(g) - 1.5f) < 1e-6f && strcmp(qol_item_value(QOL_ITEM_GLIDER, f, g), "*1.5x") == 0);
-    qol_toggle_item(QOL_ITEM_GLIDER, &f, &g);
-    assert(g == QOL_GLIDER_20 && fabsf(qol_glider_mult(g) - 2.0f) < 1e-6f && strcmp(qol_item_value(QOL_ITEM_GLIDER, f, g), "*2.0x") == 0);
-    qol_toggle_item(QOL_ITEM_GLIDER, &f, &g);
-    assert(g == QOL_GLIDER_OFF && fabsf(qol_glider_mult(g) - 1.0f) < 1e-6f && strcmp(qol_item_value(QOL_ITEM_GLIDER, f, g), "Off") == 0);
+    // A map icon: Off <-> Shown
+    qol_toggle_item(QOL_ITEM_MISKO, &s);
+    assert(s.flags == QOL_MISKO && !strcmp(qol_item_value(QOL_ITEM_MISKO, s), "*Shown") && qol_active_range(s, QOL_MAP_FIRST, QOL_MAP_N) == 1);
+    qol_toggle_item(QOL_ITEM_MISKO, &s);
+    assert(s.flags == 0);
 
-    // Toggle all 11 items ON -> active count == 11
-    for (int i = 0; i < QOL_ITEM_N; i++) qol_toggle_item(i, &f, &g);
-    assert(qol_active_count(f, g) == QOL_ITEM_N);
-    assert(f == (QOL_KOROK_UNCOLLECTED | QOL_SHRINES | QOL_CAVES | QOL_TEARS | QOL_DISPENSERS |
-                 QOL_NO_FOG | QOL_NO_ZONAI_DESPAWN | QOL_NO_ZONAI_LIMIT | QOL_INF_HORSE | QOL_SURF_SHIELD));
-    assert(g == QOL_GLIDER_15);
+    // Day length: Normal -> 2x -> 3x -> 4x -> Stopped -> Normal, and the clock's multiplier for each
+    const float day[QOL_DAY_N] = {1.0f, 0.5f, 1.0f / 3.0f, 0.25f, 0.0f};
+    const char *const dayv[QOL_DAY_N] = {"Normal", "*2x longer", "*3x longer", "*4x longer", "*Stopped"};
+    for (int k = 1; k <= QOL_DAY_N; k++) {
+        qol_toggle_item(QOL_ITEM_DAY, &s);
+        int m = k % QOL_DAY_N;
+        assert(QOL_EXT_DAY(s.ext) == m && fabsf(qol_day_mult(s.ext) - day[m]) < 1e-6f && !strcmp(qol_item_value(QOL_ITEM_DAY, s), dayv[m]));
+    }
+    // Weapon durability: Normal -> 2x -> 3x -> 5x -> Unbreakable -> Normal; the day length is left alone
+    qol_toggle_item(QOL_ITEM_DAY, &s);
+    const char *const durv[QOL_DUR_N] = {"Normal", "*2x", "*3x", "*5x", "*Unbreakable"};
+    for (int k = 1; k <= QOL_DUR_N; k++) {
+        qol_toggle_item(QOL_ITEM_DURABILITY, &s);
+        int m = k % QOL_DUR_N;
+        assert(QOL_EXT_DUR(s.ext) == m && QOL_EXT_DAY(s.ext) == QOL_DAY_2X && !strcmp(qol_item_value(QOL_ITEM_DURABILITY, s), durv[m]));
+    }
+    qol_toggle_item(QOL_ITEM_DURABILITY, &s);   // 2x
 
-    // Sanitization rejects out-of-range bits and Korok=3
+    // Glider: Off -> 1.5x -> 2.0x -> Off
+    qol_toggle_item(QOL_ITEM_GLIDER, &s);
+    assert(s.glider == QOL_GLIDER_15 && fabsf(qol_glider_mult(s.glider) - 1.5f) < 1e-6f && !strcmp(qol_item_value(QOL_ITEM_GLIDER, s), "*1.5x"));
+
+    // Show all / Hide all touch only the map icons; Reset all only the QoL mods panel's items
+    qol_toggle_item(QOL_ITEM_NO_COLD, &s);
+    qol_map_all(&s, 1);
+    assert(qol_active_range(s, QOL_MAP_FIRST, QOL_MAP_N) == QOL_MAP_N && (s.flags & QOL_KOROK_MASK) == QOL_KOROK_ALL);
+    assert(qol_active_range(s, QOL_MODS_FIRST, QOL_MODS_N) == 4);   // cold, day, durability, glider
+    qol_state kept = s;
+    qol_mods_reset(&s);
+    assert(qol_active_range(s, QOL_MODS_FIRST, QOL_MODS_N) == 0 && s.ext == 0 && s.glider == 0 && qol_active_range(s, QOL_MAP_FIRST, QOL_MAP_N) == QOL_MAP_N);
+    qol_map_all(&s, 0);
+    assert(qol_active_count(s) == 0 && s.flags == 0);
+    s = kept;
+
+    // Every item on
+    qol_state all = {0, 0, 0};
+    for (int i = 0; i < QOL_ITEM_N; i++) qol_toggle_item(i, &all);
+    assert(qol_active_count(all) == QOL_ITEM_N);
+
+    // Sanitising: unknown bits, a Korok value 3, and out-of-range modes go
     assert(qol_sanitize_flags(0xFFFFFFFFu) == (QOL_FLAGS_VALID & ~QOL_KOROK_MASK));
+    assert(qol_sanitize_ext(QOL_EXT_PACK(7, 7)) == 0 && qol_sanitize_ext(QOL_EXT_PACK(QOL_DAY_STOP, QOL_DUR_UNBREAKABLE)) == QOL_EXT_PACK(QOL_DAY_STOP, QOL_DUR_UNBREAKABLE) && qol_sanitize_ext(QOL_EXT_PACK(0, 5)) == 0);
     assert(qol_sanitize_glider(-1) == QOL_GLIDER_OFF && qol_sanitize_glider(99) == QOL_GLIDER_OFF);
 
-    // Settings persistence round-trip
-    FILE *fp = fopen(argv[1], "w+b"); assert(fp);
-    qol_write(fp, f, g);
-    long n = ftell(fp); rewind(fp);
-    char *buf = calloc((size_t)n + 1, 1); assert(buf && fread(buf, 1, (size_t)n, fp) == (size_t)n);
+    // settings.txt round trip (and the old two-line form still reads)
+    FILE *fp = fopen(argv[1], "w+");
+    assert(fp);
+    qol_write(fp, s);
+    rewind(fp);
+    char line[128];
+    qol_state r = {0, 0, 0};
+    int lines = 0;
+    while (fgets(line, sizeof line, fp)) { assert(qol_parse(line, &r)); lines++; }
     fclose(fp);
-
-    uint32_t f2 = 0; int g2 = 0;
-    for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n")) {
-        char line[64]; snprintf(line, sizeof line, "%s\n", l);
-        assert(qol_parse(line, &f2, &g2));
-    }
-    assert(f2 == f && g2 == g);
-    assert(!qol_parse("overlay=1\n", &f2, &g2));
-    free(buf);
+    assert(lines == 3 && r.flags == s.flags && r.ext == s.ext && r.glider == s.glider);
+    qol_state old = {0, 0, 0};
+    assert(qol_parse("qol_flags=7fe\n", &old) && qol_parse("qol_glider=2\n", &old) && old.flags == 0x7FE && old.glider == 2 && old.ext == 0);
+    assert(!qol_parse("overlay=1\n", &old));
     return 0;
 }
 '''

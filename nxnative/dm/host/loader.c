@@ -258,7 +258,7 @@ static const char *g_fps_mod;   // the module holding the state page (for the lo
 static _Atomic int g_fps_avail;
 static _Atomic int g_fps_override = -2;   // -2 = unset (env.txt), -1 = uncapped (120 Hz elapsed), 0/30/40/60 = cap
 static _Atomic int g_qol_avail;
-static _Atomic uint32_t g_qol_flags, g_qol_glider_bits;
+static _Atomic uint32_t g_qol_flags, g_qol_glider_bits, g_qol_ext, g_qol_day_bits = 0x3f800000u;   // (day_mult 1.0f until set)
 int dm_fps_cap_available(void) { return atomic_load(&g_fps_avail); }
 static void fps_state_write(uint8_t *st, int t) {
     float f = t < 0 ? 120.0f : (float)t;
@@ -286,15 +286,31 @@ void dm_fps_target_set(int target_fps) {
     }
 }
 int dm_qol_available(void) { return atomic_load(&g_qol_avail); }
-void dm_qol_set(uint32_t flags, float glider_mult) {
-    uint32_t gbits = 0; memcpy(&gbits, &glider_mult, sizeof gbits);
+// The QoL stubs' page (qol_mods.h): +0x40 flags, +0x44 glider multiplier, +0x48 ext (day length, weapon durability), +0x4c the game clock's multiplier.
+// +0x50 is the durability stub's own hit count (the game writes it)
+static void qol_state_write(uint8_t *st) {
+    atomic_store_explicit((_Atomic uint32_t *)(st + 0x4c), atomic_load_explicit(&g_qol_day_bits, memory_order_acquire), memory_order_release);
+    atomic_store_explicit((_Atomic uint32_t *)(st + 0x44), atomic_load_explicit(&g_qol_glider_bits, memory_order_acquire), memory_order_release);
+    atomic_store_explicit((_Atomic uint32_t *)(st + 0x48), atomic_load_explicit(&g_qol_ext, memory_order_acquire), memory_order_release);
+    atomic_store_explicit((_Atomic uint32_t *)(st + 0x40), atomic_load_explicit(&g_qol_flags, memory_order_acquire), memory_order_release);
+}
+// The durability stubs' counts (patches.py "Weapon durability"), for the log: frames stepped, the equipped items' and their fused parts' Life copies seen,
+// the actors matched as equipped when they took damage, the wear they were to take and the wear they took, the wear carried over. 0 when the build has no stubs
+int dm_qol_stats(uint32_t out[7]) {
+    uint8_t *st = dm_fps_state;
+    if (!st || !atomic_load(&g_qol_avail)) return 0;
+    static const int OFF[7] = {0x58, 0x60, 0x64, 0x68, 0x6c, 0x70, 0x50};
+    for (int i = 0; i < 7; i++) memcpy(&out[i], st + OFF[i], sizeof out[i]);
+    return 1;
+}
+void dm_qol_set(uint32_t flags, float glider_mult, uint32_t ext, float day_mult) {
+    uint32_t gbits = 0, dbits = 0; memcpy(&gbits, &glider_mult, sizeof gbits); memcpy(&dbits, &day_mult, sizeof dbits);
     atomic_store_explicit(&g_qol_flags, flags, memory_order_release);
     atomic_store_explicit(&g_qol_glider_bits, gbits, memory_order_release);
+    atomic_store_explicit(&g_qol_ext, ext, memory_order_release);
+    atomic_store_explicit(&g_qol_day_bits, dbits, memory_order_release);
     uint8_t *st = dm_fps_state;
-    if (st && atomic_load(&g_qol_avail)) {
-        atomic_store_explicit((_Atomic uint32_t *)(st + 0x40), flags, memory_order_release);
-        atomic_store_explicit((_Atomic uint32_t *)(st + 0x44), gbits, memory_order_release);
-    }
+    if (st && atomic_load(&g_qol_avail)) qol_state_write(st);
 }
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x80 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
@@ -317,11 +333,10 @@ void dm_fps_state_apply(void) {
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     if (atomic_load(&g_qol_avail)) {
-        uint32_t qf = atomic_load_explicit(&g_qol_flags, memory_order_acquire);
+        uint32_t qf = atomic_load_explicit(&g_qol_flags, memory_order_acquire), qe = atomic_load_explicit(&g_qol_ext, memory_order_acquire);
         uint32_t qb = atomic_load_explicit(&g_qol_glider_bits, memory_order_acquire);
-        atomic_store_explicit((_Atomic uint32_t *)(dm_fps_state + 0x40), qf, memory_order_release);
-        atomic_store_explicit((_Atomic uint32_t *)(dm_fps_state + 0x44), qb, memory_order_release);
-        if (qf || qb) { float gm = 1.0f; memcpy(&gm, &qb, sizeof gm); LOG("%s: QoL mods applied (flags=%#x, glider=%.1fx)", g_fps_mod, qf, gm); }
+        qol_state_write(dm_fps_state);
+        if (qf || qe || qb) { float gm = 1.0f; memcpy(&gm, &qb, sizeof gm); LOG("%s: QoL mods applied (flags=%#x, ext=%#x, glider=%.1fx)", g_fps_mod, qf, qe, gm); }
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, t < 0 ? "uncapped (elapsed time, up to 120 fps)" : !t ? "as the game sets it" : "in whole ticks decided by the host", t > 0 ? cap : "", src);

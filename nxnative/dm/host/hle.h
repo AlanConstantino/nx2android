@@ -53,11 +53,12 @@ void dm_hid_opmode_changed(void);   // hle_hid.c: an operation mode change signa
 // Focus (1 foreground / 2 focus lost / 3 background): called by the front end on lifecycle changes; a change pushes notification 15
 void dm_focus_set(int st);
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
-extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped, +0x20 u32 step ticks, +0x24 u32 fixed step, +0x28 u32 tick hz (0 = 60, 120 = 120 Hz), +0x30 u64 ticks stepped, +0x40 u32 qol flags, +0x44 float glider mult; NULL when the build has none
+extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped, +0x20 u32 step ticks, +0x24 u32 fixed step, +0x28 u32 tick hz (0 = 60, 120 = 120 Hz), +0x30 u64 ticks stepped, +0x40 u32 qol flags, +0x44 float glider mult, +0x48 u32 qol ext, +0x4c float day mult, +0x50 u32 durability hits (qol_mods.h); NULL when the build has none
 int dm_fps_cap_available(void);
 void dm_fps_target_set(int target_fps);   // live mid-game FPS target: -1 = uncapped (120 Hz elapsed), 60 / 40 / 30 = host step, -2 = unset (env.txt)
 int dm_qol_available(void);
-void dm_qol_set(uint32_t flags, float glider_mult);
+int dm_qol_stats(uint32_t out[7]);   // loader.c: the durability stubs' counts, for the log
+void dm_qol_set(uint32_t flags, float glider_mult, uint32_t ext, float day_mult);   // loader.c: the QoL stubs' state page +0x40..+0x4f (qol_mods.h)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

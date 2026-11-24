@@ -1167,7 +1167,7 @@ with open(P('fixups.tsv'), 'w') as f:
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
-    if QOL_MODS: f.write('# QOL_MODS\t1\n')           # live QoL mod stubs read state +0x40..+0x47 (loader.c dm_qol_available)
+    if QOL_MODS: f.write('# QOL_MODS\t1\n')           # live QoL mod stubs read state +0x40..+0x53 (loader.c dm_qol_available)
     f.write(f'# TARGET\t{TARGET}\n')   # the slot access differs per OS: the host refuses an image rewritten for the other one
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:

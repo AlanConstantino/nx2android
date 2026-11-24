@@ -13,7 +13,10 @@ def frame_step(ctx):
     # frame step (replaces ldrb w9,[x0,#0x58], the first instruction after the prologue)
     fs_site(0x2db18c, '09604139')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xbd400200,   # ldr s0,[x16]           target fps
+    for w in (0xB9405A11,   # ldr w17,[x16,#0x58]    frames stepped (the QoL durability stubs' clock; x17 is free at a function's first instruction)
+              0x11000631,   # add w17,w17,#1
+              0xB9005A11,   # str w17,[x16,#0x58]
+              0xbd400200,   # ldr s0,[x16]           target fps
               0x1e202008,   # fcmp s0,#0.0
               0x54000660,   # b.eq off (+51)        target 0: original path
               0xb9402202,   # ldr w2,[x16,#0x20]     step in ticks (60 Hz vsyncs or 120 Hz refreshes)
@@ -270,6 +273,185 @@ def frame_step(ctx):
     emit(0xB97F0808)                     # ldr w8, [x0, #0x3f08] (original)
     emit(B(here(), 0x1b7bb28))
     fs_put(0x1b7bb24, [B(0x1b7bb24, st)], 'QoL: unbreakable shield while shield surfing')
+
+    # The sites below were checked against three 1.4.3 sources (Arch9SK7/MyNXCheats 277178B7DBA1B6D4.txt, its 1.4.2 file 5CB42B1CF25469FB.txt, and for the
+    # durability sites aismor/kingdom-recomp recomp/patches-v143.txt and SuperSenad/Ultra-Instinct-Tears tools/lifter/patches.py); fs_site checks each original word.
+    def cbz_target(site, word):          # where a cbz at site jumps (the icon is hidden there)
+        imm = (word >> 5) & 0x7FFFF
+        return site + ((imm - (1 << 19)) if imm & (1 << 18) else imm) * 4
+    def le(word): return word.to_bytes(4, 'little').hex()
+    bcond = lambda cond, insns: 0x54000000 | ((insns & 0x7FFFF) << 5) | cond
+
+    # 12. Map icons (bits 11..18): each "is it known" check, ldrb w8,[x29,#..] then cbz w8 -> hide, shows the icon type while its bit is on. These only read
+    # flags (no game data is written). Misko's treasure: the public 1.4.3 file repeats the Great Fairy address; 0x20fe904 is the next function of the same
+    # shape, 0x648 after it as Misko's was 0x644 after the Great Fairy's in 1.4.2 (0x20f8a90, 0x20f90d4)
+    for site, word, bit, what in ((0x736614, 0x340002C8, 11, 'Skyview Towers'), (0x20F9F9C, 0x340000E8, 13, 'unvisited places'),
+                                  (0x20FE2BC, 0x34FFFBA8, 14, 'Great Fairies'), (0x20FE904, 0x34FFFBA8, 15, "Misko's treasure"),
+                                  (0x20FEDD4, 0x34FFFBE8, 16, 'Bargainer Statues'), (0x20FDC68, 0x34FFFB48, 17, 'old maps'),
+                                  (0x20F8068, 0x34000988, 18, 'the five temples')):
+        emit_cbz_w8_bypass(site, le(word), cbz_target(site, word), bit, f'QoL: show all {what} on map')
+    # Villages & Stables (bit 12): ldrb w8,[x29,#28] -> mov w8,#1 (its cbnz then goes the "known" way)
+    emit_bit_swap(0x736ce0, le(0x394073A8), 0x394073A8, 0x52800028, 12, 'QoL: show all villages & stables on map')
+
+    # 13. Temperature (bits 19..21), the public cheat's three sites, one switch each
+    emit_bit_swap(0x72ae28, le(0x1A9F57E0), 0x1A9F57E0, 0x2A1F03E0, 19, 'QoL: no cold damage (below-limit check: cset w0,mi -> mov w0,wzr)')
+    emit_bit_swap(0x72b124, le(0xBD400009), 0xBD400009, 0xBD400809, 20, 'QoL: no heat damage (above-limit check reads [x0,#8])')
+    emit_bit_swap(0x324c14, le(0xB9400008), 0xB9400008, 0x52800068, 21, 'QoL: no fire damage (ldr w8,[x0] -> mov w8,#3)')
+
+    # 14. Day length (ext +0x48 bits 0..2; day_mult float +0x4c): the clock's step this frame, ldr s9,[x19,#60] (2 x the frame's time, written at 0x68c0dc), x day_mult.
+    # Multiplied rather than replaced (the public cheat's fmov s9,#1.0 assumes 30 fps). s16 is free: this function never touches v16..v31
+    fs_site(0x68c15c, le(0xBD403E69))
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xB9404A10,                # ldr w16, [x16, #0x48]  ext
+              0x12000A10,                # and w16, w16, #7       day length
+              cbz_w(16, 6)):             # Normal -> original
+        emit(w)
+    emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xBD404E10,                # ldr s16, [x16, #0x4c]  day_mult
+              0xBD403E69,                # ldr s9, [x19, #60]     (original)
+              0x1E300929):               # fmul s9, s9, s16
+        emit(w)
+    emit(B(here(), 0x68c160))
+    emit(0xBD403E69)                     # ldr s9, [x19, #60]     (original)
+    emit(B(here(), 0x68c160))
+    fs_put(0x68c15c, [B(0x68c15c, st)], 'QoL: day length (the clock step x state +0x4c)')
+
+    # 15. Weapon durability (ext +0x48 bits 4..6: 1 2x, 2 3x, 3 5x, 4 unbreakable). A weapon's, bow's or shield's durability is its actor's Life (the handle at
+    # component +0x1830, the value at handle +8, as for every actor), and wear is damage queued for that actor like any other. Four sites:
+    #   a) main+0x282870 copies each equipped item's Life (0x2829f4) and its fused part's (0x282e58) to the pouch ("Life" = murmur3 0x0355c603). The stubs there
+    #      note the handle and the frame (+0x58) in a table (+0x100 the items by slot w28, +0x200 their fused parts; 16 bytes each), and for Unbreakable make the
+    #      Life read its maximum, written back (the public cheat: Arch9SK7/MyNXCheats, also in aismor/kingdom-recomp and SuperSenad/Ultra-Instinct-Tears)
+    #   b) main+0x44039c, add w9,w8,w9: the damage an actor takes this frame (the only place a Life goes down). For an actor whose handle is in the table and was
+    #      noted in the last 64 frames, so for Link's equipped items only: none (Unbreakable), or one part in N (the rest stays in +0x50 for the next hits)
+    #   c) main+0x21eca9c, msub w8,w10,w9,w8: the charges of a weapon that shoots (its own count, not the Life): none, or on one shot in N (count at +0x54)
+    # Diagnostics the host logs when the pause menu opens (loader.c dm_qol_stats): +0x60 / +0x64 the copies seen at a), +0x68 actors matched at b), +0x6c the
+    # wear they were to take, +0x70 the wear they took. x16, x17 are free at b) (the function only uses them after 0x440c30, written first); w8 is dead after it
+    ADRP_STATE, B_BACK = 0xD4200020, 0xD4200040          # (brk #1, brk #2: placeholders in the tables below)
+    def emit_stub(site, orig_word, words, why):
+        fs_site(site, le(orig_word))
+        st = here()
+        for w in words: emit(ADRP(16, here(), FS_STATE_OFF) if w == ADRP_STATE else B(here(), site + 4) if w == B_BACK else w)
+        fs_put(site, [B(site, st)], why)
+    SYNC1 = (
+        0xD4200020,   #  0 adrp x16, STATE
+        0x91040201,   #  1 add x1, x16, #0x100
+        0x8B3C5021,   #  2 add x1, x1, w28, uxtw #4
+        0xF9000028,   #  3 str x8, [x1]
+        0xB9405A10,   #  4 ldr w16, [x16, #0x58]
+        0xB9000830,   #  5 str w16, [x1, #0x8]
+        0xD4200020,   #  6 adrp x16, STATE
+        0xB9406201,   #  7 ldr w1, [x16, #0x60]
+        0x11000421,   #  8 add w1, w1, #0x1
+        0xB9006201,   #  9 str w1, [x16, #0x60]
+        0xB9404A10,   # 10 ldr w16, [x16, #0x48]
+        0x53041A10,   # 11 ubfx w16, w16, #4, #3
+        0x51001210,   # 12 sub w16, w16, #0x4
+        0x35000090,   # 13 cbnz w16, +4
+        0xB9401901,   # 14 ldr w1, [x8, #0x18]
+        0xB9000901,   # 15 str w1, [x8, #0x8]
+        0xD4200040,   # 16 b back
+        0xB9400901,   # 17 ldr w1, [x8, #0x8]
+        0xD4200040,   # 18 b back
+    )
+    SYNC2 = (
+        0xD4200020,   #  0 adrp x16, STATE
+        0x91080201,   #  1 add x1, x16, #0x200
+        0x8B3C5021,   #  2 add x1, x1, w28, uxtw #4
+        0xF9000028,   #  3 str x8, [x1]
+        0xB9405A10,   #  4 ldr w16, [x16, #0x58]
+        0xB9000830,   #  5 str w16, [x1, #0x8]
+        0xD4200020,   #  6 adrp x16, STATE
+        0xB9406601,   #  7 ldr w1, [x16, #0x64]
+        0x11000421,   #  8 add w1, w1, #0x1
+        0xB9006601,   #  9 str w1, [x16, #0x64]
+        0xB9404A10,   # 10 ldr w16, [x16, #0x48]
+        0x53041A10,   # 11 ubfx w16, w16, #4, #3
+        0x51001210,   # 12 sub w16, w16, #0x4
+        0x35000090,   # 13 cbnz w16, +4
+        0xB9401901,   # 14 ldr w1, [x8, #0x18]
+        0xB9000901,   # 15 str w1, [x8, #0x8]
+        0xD4200040,   # 16 b back
+        0xB9400901,   # 17 ldr w1, [x8, #0x8]
+        0xD4200040,   # 18 b back
+    )
+    APPLY = (
+        0x0B090109,   #  0 add w9, w8, w9
+        0x340005E9,   #  1 cbz w9, +47
+        0x37F805C9,   #  2 tbnz w9, #0x1f, +46
+        0xD4200020,   #  3 adrp x16, STATE
+        0xB9404A11,   #  4 ldr w17, [x16, #0x48]
+        0x53041A31,   #  5 ubfx w17, w17, #4, #3
+        0x34000551,   #  6 cbz w17, +42
+        0xF94C1A68,   #  7 ldr x8, [x19, #0x1830]
+        0xB4000508,   #  8 cbz x8, +40
+        0xA9BF07E0,   #  9 stp x0, x1, [sp, #-0x10]!
+        0xB9405A00,   # 10 ldr w0, [x16, #0x58]
+        0x91040201,   # 11 add x1, x16, #0x100
+        0xF9400030,   # 12 ldr x16, [x1]
+        0xCA080210,   # 13 eor x16, x16, x8
+        0xB50000B0,   # 14 cbnz x16, +5
+        0xB9400830,   # 15 ldr w16, [x1, #0x8]
+        0x4B100010,   # 16 sub w16, w0, w16
+        0x53067E10,   # 17 lsr w16, w16, #6
+        0x340000D0,   # 18 cbz w16, +6
+        0x91004021,   # 19 add x1, x1, #0x10
+        0x92402C30,   # 20 and x16, x1, #0xfff
+        0xD10C0210,   # 21 sub x16, x16, #0x300
+        0xB5FFFED0,   # 22 cbnz x16, +-10
+        0x14000018,   # 23 b +24
+        0x9274CC21,   # 24 and x1, x1, #0xfffffffffffff000
+        0xB9406830,   # 25 ldr w16, [x1, #0x68]
+        0x11000610,   # 26 add w16, w16, #0x1
+        0xB9006830,   # 27 str w16, [x1, #0x68]
+        0xB9406C30,   # 28 ldr w16, [x1, #0x6c]
+        0x0B090210,   # 29 add w16, w16, w9
+        0xB9006C30,   # 30 str w16, [x1, #0x6c]
+        0x51001230,   # 31 sub w16, w17, #0x4
+        0x34000170,   # 32 cbz w16, +11
+        0x11000620,   # 33 add w0, w17, #0x1
+        0x53017E30,   # 34 lsr w16, w17, #1
+        0x0A110210,   # 35 and w16, w16, w17
+        0x0B100000,   # 36 add w0, w0, w16
+        0xB9405030,   # 37 ldr w16, [x1, #0x50]
+        0x0B090210,   # 38 add w16, w16, w9
+        0x1AC00A09,   # 39 udiv w9, w16, w0
+        0x1B00C130,   # 40 msub w16, w9, w0, w16
+        0xB9005030,   # 41 str w16, [x1, #0x50]
+        0x14000002,   # 42 b +2
+        0x2A1F03E9,   # 43 mov w9, wzr
+        0xB9407030,   # 44 ldr w16, [x1, #0x70]
+        0x0B090210,   # 45 add w16, w16, w9
+        0xB9007030,   # 46 str w16, [x1, #0x70]
+        0xA8C107E0,   # 47 ldp x0, x1, [sp], #0x10
+        0xD4200040,   # 48 b back
+    )
+    SHOTS = (
+        0xD4200020,   #  0 adrp x16, STATE
+        0xB9404A10,   #  1 ldr w16, [x16, #0x48]
+        0x53041A10,   #  2 ubfx w16, w16, #4, #3
+        0x34000210,   #  3 cbz w16, +16
+        0x7100121F,   #  4 cmp w16, #0x4
+        0x540001E2,   #  5 b.hs +15
+        0x1B097D4A,   #  6 mul w10, w10, w9
+        0x11000609,   #  7 add w9, w16, #0x1
+        0x71000E1F,   #  8 cmp w16, #0x3
+        0x1A891529,   #  9 cinc w9, w9, eq
+        0xD4200020,   # 10 adrp x16, STATE
+        0xB9405614,   # 11 ldr w20, [x16, #0x54]
+        0x11000694,   # 12 add w20, w20, #0x1
+        0x6B09029F,   # 13 cmp w20, w9
+        0x1A9423F4,   # 14 csel w20, wzr, w20, hs
+        0xB9005614,   # 15 str w20, [x16, #0x54]
+        0x35000094,   # 16 cbnz w20, +4
+        0x4B0A0108,   # 17 sub w8, w8, w10
+        0xD4200040,   # 18 b back
+        0x1B09A148,   # 19 msub w8, w10, w9, w8
+        0xD4200040,   # 20 b back
+    )
+    emit_stub(0x2829f4, 0xB9400901, SYNC1, 'QoL: weapon durability, the equipped items (their Life handles noted; unbreakable: Life = its maximum)')
+    emit_stub(0x282e58, 0xB9400901, SYNC2, 'QoL: weapon durability, the equipped items\' fused parts')
+    emit_stub(0x44039c, 0x0B090109, APPLY, 'QoL: weapon durability, the wear an equipped item takes (2x / 3x / 5x / unbreakable)')
+    emit_stub(0x21eca9c, 0x1B09A148, SHOTS, 'QoL: weapon durability, the charges of a weapon that shoots')
     ctx.qol_mods = 1
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}

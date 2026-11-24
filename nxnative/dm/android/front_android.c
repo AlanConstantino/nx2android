@@ -93,8 +93,22 @@ static int g_menu_reveal_ptr = -1;                // pointer id that tapped the 
 int dm_menu_btn_autohide(void) { return atomic_load(&g_set_menu_autohide); }
 static _Atomic int g_set_labels = -1;   // a controller's face buttons by their label (1) or their position (0); -1: as env.txt says (pad_labels)
 static _Atomic uint32_t g_qol_flags = 0;   // live QoL mod flags (qol_mods.h; 0 = all off by default)
+static _Atomic uint32_t g_qol_ext = 0;     // day length and weapon durability (qol_mods.h qol_ext; 0 = the game's own)
 static _Atomic int g_qol_glider = 0;       // paraglider speed boost level (0 = off, 1 = 1.5x, 2 = 2.0x)
-void dm_qol_set(uint32_t flags, float glider_mult);   // loader.c: updates dm_fps_state +0x40 / +0x44 live
+void dm_qol_set(uint32_t flags, float glider_mult, uint32_t ext, float day_mult);   // loader.c: updates dm_fps_state +0x40 .. +0x4f live
+int dm_qol_stats(uint32_t out[7]);         // loader.c: the durability stubs' counts
+static void qol_log_stats(void) {   // one line when the pause menu or a QoL panel opens: what the durability stubs saw (patches.py "Weapon durability")
+    uint32_t s[7];
+    if (!dm_qol_stats(s)) return;
+    LOG("[qol] durability: mode %d, %u frames, equipped Life copies %u + %u fused, %u damaged while equipped, wear asked %u, taken %u, carried %u", QOL_EXT_DUR(atomic_load(&g_qol_ext)),
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6]);
+}
+static qol_state qol_now(void) { return (qol_state){atomic_load(&g_qol_flags), atomic_load(&g_qol_ext), atomic_load(&g_qol_glider)}; }
+static void qol_publish(qol_state s) {   // the live state, and the stubs' page
+    s = qol_sanitize(s);
+    atomic_store(&g_qol_flags, s.flags); atomic_store(&g_qol_ext, s.ext); atomic_store(&g_qol_glider, s.glider);
+    dm_qol_set(s.flags, qol_glider_mult(s.glider), s.ext, qol_day_mult(s.ext));
+}
 void dm_fps_target_set(int target_fps);               // loader.c: updates dm_fps_state live (-1=uncapped, 60, 40, 30)
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // controller slots, held keys, custom remap table and per-player state
 static pad_remap_table g_remap;   // protected by g_slot_mu; custom button / paddle bindings saved in settings.txt
@@ -160,8 +174,8 @@ static void fps_cap_step(int delta) {
 }
 static void settings_load(void) {
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
-    uint32_t qf = 0; int qg = 0;
-    if (!f) { dm_qol_set(0, 1.0f); return; }
+    qol_state qs = {0, 0, 0};
+    if (!f) { qol_publish(qs); return; }
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
         else if (sscanf(line, "fps=%d", &v) == 1) atomic_store(&g_set_fps, v != 0);
         else if (fps_opt_parse(line)) {}
@@ -172,7 +186,7 @@ static void settings_load(void) {
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
         else if (sscanf(line, "labels=%d", &v) == 1) atomic_store(&g_set_labels, v != 0);
         else if (sscanf(line, "menu_autohide=%d", &v) == 1) atomic_store(&g_set_menu_autohide, v != 0);
-        else if (qol_parse(line, &qf, &qg)) {}
+        else if (qol_parse(line, &qs)) {}
         else if (pad_remap_parse(&g_remap, line)) {}
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>[,<hidden>]: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
             char lay[16], name[32]; int x, y, z, hid = 0, l, i;
@@ -186,9 +200,7 @@ static void settings_load(void) {
         else if (sscanf(line, "menu_y=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][1], v + 1); }   // the editor
     }
     fclose(f);
-    atomic_store(&g_qol_flags, qf);
-    atomic_store(&g_qol_glider, qg);
-    dm_qol_set(qf, qol_glider_mult(qg));
+    qol_publish(qs);
     { const char *om = getenv("DM_OPMODE"); int docked = om ? atoi(om) != 0 : 0; fps_cap_apply_mode(docked); }
 }
 static void settings_save(void) {
@@ -202,8 +214,8 @@ static void settings_save(void) {
     fps_opt_write(f);
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
     fprintf(f, "menu_autohide=%d\n", atomic_load(&g_set_menu_autohide));
-    if (dm_qol_available() || atomic_load(&g_qol_flags) || atomic_load(&g_qol_glider))
-        qol_write(f, atomic_load(&g_qol_flags), atomic_load(&g_qol_glider));
+    if (dm_qol_available() || qol_active_count(qol_now()))
+        qol_write(f, qol_now());
     pad_remap_table rm_copy;
     pthread_mutex_lock(&g_slot_mu); rm_copy = g_remap; pthread_mutex_unlock(&g_slot_mu);
     pad_remap_write(&rm_copy, f);
@@ -690,7 +702,7 @@ static void menu_open(int hi) {
     for (int i = 0; i < 32; i++) g_ptr_ctl[i] = 0;
     dm_haptics_suspend(4, 1);   // (bits 1 and 2 are the iOS front end's reasons)
     hold_sync(); dm_overlay_redraw();
-    LOG("[menu] opened: the game is paused");
+    LOG("[menu] opened: the game is paused"); qol_log_stats();
 }
 static void ed_cancel(void); static void sp_back(void); static void rm_back(void); static void qm_back(void);
 static void menu_close(void) {
@@ -709,7 +721,7 @@ static void menu_opacity(int v) {   // the slider: a new value is drawn at once 
     if (atomic_exchange(&g_set_opacity, v) != v) { dm_haptics_android_tap(); dm_overlay_redraw(); }
 }
 static void menu_tab(int t) { t = (t % OVM_TABS + OVM_TABS) % OVM_TABS; if (atomic_exchange(&g_menu_tab, t) != t) dm_haptics_android_tap(); dm_overlay_redraw(); }
-static void ed_open(void); static void sp_open(void); static void rm_open(void); static void qm_open(void); static void save_export(void);
+static void ed_open(void); static void sp_open(void); static void rm_open(void); static void qm_open(int kind); static void save_export(void);
 static void menu_audio(void) {
     if (!g_act || !g_act->vm || !g_act->clazz || !g_audio_menu_method) return;
     JNIEnv *e = NULL; int attached = 0;
@@ -737,7 +749,8 @@ static void menu_do(int item) {
     else if (item == OVM_EXPORT) { if (atomic_load(&g_sv_st) == OVX_BUSY) return; save_export(); }
     else if (item == OVM_IMPORT) { dm_haptics_android_tap(); sp_open(); return; }
     else if (item == OVM_AUDIO) { menu_audio(); }
-    else if (item == OVM_MODS) { dm_haptics_android_tap(); qm_open(); return; }
+    else if (item == OVM_MODS) { dm_haptics_android_tap(); qm_open(0); return; }
+    else if (item == OVM_MAPS) { dm_haptics_android_tap(); qm_open(1); return; }
     if (item >= 0 && item < OVM_N) dm_haptics_android_tap();
     if (item == OVM_RESUME) menu_close(); else dm_overlay_redraw();
 }
@@ -1132,27 +1145,38 @@ static int rm_fill_rows(ov_srow rows[OVM_ROWS]) {
     return 1;
 }
 
-// ---- live mid-game QoL mods panel (qol_mods.h): opened from Game -> QoL mods; shares the OVS_ST sub-panel renderer ----
-// Page 1: Map & World (Korok map, Shrines & Lightroots, Caves/Wells/Chasms, Dragon Tears, Zonai Dispensers, Disable fog).
-// Page 2: Travel & Gear (No Zonai despawn, No 21 Zonai limit, Paraglider speed, Infinite horse stamina, Unbreakable surf shield, Reset all).
-#define QM_PER_PAGE 6
-#define QM_PAGES 2
+// ---- the live mid-game QoL panels (qol_mods.h): Game -> QoL mods (kind 0) and Game -> Map icons (kind 1); they share the OVS_ST sub-panel renderer ----
+// QoL mods: fog, temperature, day length, weapon durability, Zonai, glider, horse, surf shield, then Reset all (its own items only).
+// Map icons: one row per icon type (Korok seeds: Off / Uncollected / All), then Show all and Hide all.
+#define QM_PER_PAGE (OVM_ROWS - 3)
 static pthread_mutex_t g_qm_mu = PTHREAD_MUTEX_INITIALIZER;
-static struct { int page, ptr, row; char note[40]; } g_qm = {.ptr = -1};
+static struct { int kind, page, ptr, row; char note[40]; } g_qm = {.ptr = -1};
+static int qm_first(int kind) { return kind ? QOL_MAP_FIRST : QOL_MODS_FIRST; }
+static int qm_items(int kind) { return kind ? QOL_MAP_N : QOL_MODS_N; }
+static int qm_extras(int kind) { return kind ? 2 : 1; }
+static int qm_pages(int kind) { return (qm_items(kind) + qm_extras(kind) + QM_PER_PAGE - 1) / QM_PER_PAGE; }
+static void qm_where(int *kind, int *page) { pthread_mutex_lock(&g_qm_mu); *kind = g_qm.kind; *page = g_qm.page; pthread_mutex_unlock(&g_qm_mu); }
+static int qm_extra_ok(int kind, int k) {   // Reset all / Show all / Hide all: only when it would change something
+    qol_state s = qol_now(); int on = qol_active_range(s, qm_first(kind), qm_items(kind));
+    if (!kind) return on > 0;
+    if (k == 0) return on < qm_items(kind) || (s.flags & QOL_KOROK_MASK) != QOL_KOROK_ALL;
+    return on > 0;
+}
 static void qm_changed(void) { atomic_fetch_add(&g_qm_ver, 1); dm_overlay_redraw(); }
 static int qm_selectable(int row) {
     if (row == OVM_ROWS - 2 || row == OVM_ROWS - 1) return 1;
     if (row < 1 || row > QM_PER_PAGE) return 0;
-    pthread_mutex_lock(&g_qm_mu); int page = g_qm.page; pthread_mutex_unlock(&g_qm_mu);
-    int idx = page * QM_PER_PAGE + (row - 1);
-    if (idx < QOL_ITEM_N) return 1;
-    if (idx == QOL_ITEM_N) return qol_active_count(atomic_load(&g_qol_flags), atomic_load(&g_qol_glider)) > 0;
+    int kind, page; qm_where(&kind, &page);
+    int slot = page * QM_PER_PAGE + (row - 1), n = qm_items(kind);
+    if (slot < n) return 1;
+    if (slot < n + qm_extras(kind)) return qm_extra_ok(kind, slot - n);
     return 0;
 }
-static void qm_open(void) {
-    pthread_mutex_lock(&g_qm_mu); g_qm.page = 0; g_qm.ptr = -1; g_qm.note[0] = 0; pthread_mutex_unlock(&g_qm_mu);
+static void qm_open(int kind) {
+    pthread_mutex_lock(&g_qm_mu); g_qm.kind = kind != 0; g_qm.page = 0; g_qm.ptr = -1; g_qm.note[0] = 0; pthread_mutex_unlock(&g_qm_mu);
     atomic_store(&g_qm_hi, 1); atomic_store(&g_qm_on, 1); qm_changed();
-    LOG("[qol] panel opened (flags=%#x, glider=%d)", atomic_load(&g_qol_flags), atomic_load(&g_qol_glider));
+    LOG("[qol] %s panel opened (flags=%#x, ext=%#x, glider=%d)", kind ? "map icons" : "QoL mods", atomic_load(&g_qol_flags), atomic_load(&g_qol_ext), atomic_load(&g_qol_glider));
+    if (!kind) qol_log_stats();
 }
 static void qm_back(void) {
     dm_haptics_android_tap();
@@ -1161,42 +1185,37 @@ static void qm_back(void) {
 }
 static void qm_page(int d) {
     pthread_mutex_lock(&g_qm_mu);
-    g_qm.page = (g_qm.page + d + QM_PAGES) % QM_PAGES;
+    int pages = qm_pages(g_qm.kind);
+    g_qm.page = (g_qm.page + d + pages) % pages;
     g_qm.note[0] = 0;
     pthread_mutex_unlock(&g_qm_mu);
     int hi = atomic_load(&g_qm_hi);
     if (hi >= 1 && hi <= QM_PER_PAGE && !qm_selectable(hi)) atomic_store(&g_qm_hi, 1);
     dm_haptics_android_tap(); qm_changed();
 }
+static void qm_note(const char *n) { pthread_mutex_lock(&g_qm_mu); snprintf(g_qm.note, sizeof g_qm.note, "%s", n); pthread_mutex_unlock(&g_qm_mu); }
 static void qm_do(int row, int tap_side) {
     if (row == OVM_ROWS - 1) { qm_back(); return; }
     if (row == 0 || row == OVM_ROWS - 2) { qm_page(tap_side < 0 ? -1 : 1); return; }
     if (row < 1 || row > QM_PER_PAGE) return;
-    pthread_mutex_lock(&g_qm_mu); int page = g_qm.page; pthread_mutex_unlock(&g_qm_mu);
-    int idx = page * QM_PER_PAGE + (row - 1);
-    if (idx < QOL_ITEM_N) {
-        uint32_t f = atomic_load(&g_qol_flags);
-        int g = atomic_load(&g_qol_glider);
-        qol_toggle_item(idx, &f, &g);
-        atomic_store(&g_qol_flags, f);
-        atomic_store(&g_qol_glider, g);
-        dm_qol_set(f, qol_glider_mult(g));
-        pthread_mutex_lock(&g_qm_mu); g_qm.note[0] = 0; pthread_mutex_unlock(&g_qm_mu);
+    int kind, page; qm_where(&kind, &page);
+    int slot = page * QM_PER_PAGE + (row - 1), n = qm_items(kind);
+    qol_state s = qol_now();
+    if (slot < n) {
+        int idx = qm_first(kind) + slot;
+        qol_toggle_item(idx, &s); qol_publish(s); qm_note("");
         settings_save(); dm_haptics_android_tap(); qm_changed();
-        const char *val = qol_item_value(idx, f, g);
-        LOG("[qol] %s -> %s (flags=%#x, glider=%.1fx)", QOL_ITEM_LABELS[idx], val[0] == '*' ? val + 1 : val, f, qol_glider_mult(g));
+        const char *val = qol_item_value(idx, s);
+        LOG("[qol] %s -> %s (flags=%#x, ext=%#x, glider=%.1fx, day x%.3f)", QOL_ITEM_LABELS[idx], val[0] == '*' ? val + 1 : val, s.flags, s.ext, qol_glider_mult(s.glider), qol_day_mult(s.ext));
         return;
     }
-    if (idx == QOL_ITEM_N) {
-        if (!qol_active_count(atomic_load(&g_qol_flags), atomic_load(&g_qol_glider))) return;
-        atomic_store(&g_qol_flags, 0);
-        atomic_store(&g_qol_glider, QOL_GLIDER_OFF);
-        dm_qol_set(0, 1.0f);
-        pthread_mutex_lock(&g_qm_mu); snprintf(g_qm.note, sizeof g_qm.note, "*All reset Off"); pthread_mutex_unlock(&g_qm_mu);
-        atomic_store(&g_qm_hi, 1);
-        settings_save(); dm_haptics_android_tap(); qm_changed();
-        LOG("[qol] reset all mods to Off");
-    }
+    if (slot >= n + qm_extras(kind) || !qm_extra_ok(kind, slot - n)) return;
+    if (!kind) { qol_mods_reset(&s); qm_note("*All reset Off"); LOG("[qol] reset all QoL mods to Off"); }
+    else if (slot == n) { qol_map_all(&s, 1); qm_note("*All shown"); LOG("[qol] map icons: all shown"); }
+    else { qol_map_all(&s, 0); qm_note("*All hidden"); LOG("[qol] map icons: all hidden"); }
+    qol_publish(s);
+    if (!qm_selectable(atomic_load(&g_qm_hi))) atomic_store(&g_qm_hi, 1);
+    settings_save(); dm_haptics_android_tap(); qm_changed();
 }
 static void qm_key(uint64_t bit) {
     int hi = atomic_load(&g_qm_hi);
@@ -1230,22 +1249,22 @@ static void qm_touch(AInputEvent *e, float W, float H) {
 static int qm_fill_rows(ov_srow rows[OVM_ROWS]) {
     memset(rows, 0, sizeof(ov_srow) * OVM_ROWS);
     pthread_mutex_lock(&g_qm_mu);
-    int page = g_qm.page; char note[40]; snprintf(note, sizeof note, "%s", g_qm.note);
+    int kind = g_qm.kind, page = g_qm.page; char note[40]; snprintf(note, sizeof note, "%s", g_qm.note);
     pthread_mutex_unlock(&g_qm_mu);
-    uint32_t f = atomic_load(&g_qol_flags);
-    int g = atomic_load(&g_qol_glider), active = qol_active_count(f, g);
-    static const char *const PAGE_NAMES[QM_PAGES] = {"Map & World", "Travel & Gear"};
-    SP_ROW(0, OVS_TITLE, "QoL: %s", PAGE_NAMES[page]);
+    qol_state s = qol_now();
+    int first = qm_first(kind), n = qm_items(kind), pages = qm_pages(kind), active = qol_active_range(s, first, n);
+    SP_ROW(0, OVS_TITLE, "%s", kind ? "Map icons" : "QoL mods");
     if (note[0]) snprintf(rows[0].right, sizeof rows[0].right, "%s", note);
-    else if (active > 0) snprintf(rows[0].right, sizeof rows[0].right, "*%d on  %d / %d", active, page + 1, QM_PAGES);
-    else snprintf(rows[0].right, sizeof rows[0].right, "Page %d / %d", page + 1, QM_PAGES);
+    else if (active > 0) snprintf(rows[0].right, sizeof rows[0].right, "*%d on  %d / %d", active, page + 1, pages);
+    else snprintf(rows[0].right, sizeof rows[0].right, "Page %d / %d", page + 1, pages);
     for (int j = 0; j < QM_PER_PAGE; j++) {
-        int idx = page * QM_PER_PAGE + j;
-        if (idx < QOL_ITEM_N) {
-            SP_ROW(1 + j, OVS_ITEM, "%s", QOL_ITEM_LABELS[idx]);
-            snprintf(rows[1 + j].right, sizeof rows[1 + j].right, "%s", qol_item_value(idx, f, g));
-        } else if (idx == QOL_ITEM_N) {
-            SP_ROW(1 + j, active > 0 ? OVS_BUTTON : OVS_DISABLED, "Reset all to Off");
+        int slot = page * QM_PER_PAGE + j;
+        if (slot < n) {
+            SP_ROW(1 + j, OVS_ITEM, "%s", QOL_ITEM_LABELS[first + slot]);
+            snprintf(rows[1 + j].right, sizeof rows[1 + j].right, "%s", qol_item_value(first + slot, s));
+        } else if (slot < n + qm_extras(kind)) {
+            static const char *const EXTRA[2][2] = {{"Reset all to Off", ""}, {"Show all", "Hide all"}};
+            SP_ROW(1 + j, qm_extra_ok(kind, slot - n) ? OVS_BUTTON : OVS_DISABLED, "%s", EXTRA[kind][slot - n]);
         }
     }
     SP_ROW(OVM_ROWS - 2, OVS_ITEM, "< Prev page (L)");
