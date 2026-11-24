@@ -228,6 +228,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "QOL_MODS")) m->qol_mods = (int)v;
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
@@ -254,9 +255,52 @@ static void read_layout(module_t *m, const char *dir) {
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
 static const char *g_fps_mod;   // the module holding the state page (for the log)
+static _Atomic int g_fps_avail;
+static _Atomic int g_fps_override = -2;   // -2 = unset (env.txt), -1 = uncapped (120 Hz elapsed), 0/30/40/60 = cap
+static _Atomic int g_qol_avail;
+static _Atomic uint32_t g_qol_flags, g_qol_glider_bits;
+int dm_fps_cap_available(void) { return atomic_load(&g_fps_avail); }
+static void fps_state_write(uint8_t *st, int t) {
+    float f = t < 0 ? 120.0f : (float)t;
+    uint32_t fbits = 0; memcpy(&fbits, &f, sizeof fbits);
+    if (t < 0) {   // uncapped: clear host step so the stub runs its elapsed-time dynamic-FPS path up to 120 fps (movies still cap at 30)
+        atomic_store_explicit((_Atomic uint32_t *)(st + 0x20), 0, memory_order_release);
+        double zero = 0.0; memcpy(st + 0x08, &zero, sizeof zero);
+        atomic_store_explicit((_Atomic uint32_t *)(st + 0x28), 120, memory_order_release);
+    } else {
+        uint32_t thz = t == 40 ? 120 : 60;
+        atomic_store_explicit((_Atomic uint32_t *)(st + 0x28), thz, memory_order_release);
+    }
+    atomic_store_explicit((_Atomic uint32_t *)st, fbits, memory_order_release);
+}
+void dm_fps_target_set(int target_fps) {
+    if (target_fps != -2 && target_fps != -1 && target_fps != 0 && target_fps != 30 && target_fps != 40 && target_fps != 60) return;
+    int prev = atomic_exchange_explicit(&g_fps_override, target_fps, memory_order_acq_rel);
+    uint8_t *st = dm_fps_state;
+    if (st && target_fps != -2) {
+        fps_state_write(st, target_fps);
+        if (prev != target_fps) {
+            if (target_fps < 0) LOG("[nvn] frame rate mode → uncapped (menu)");
+            else LOG("[nvn] frame rate mode → %d fps (menu)", target_fps);
+        }
+    }
+}
+int dm_qol_available(void) { return atomic_load(&g_qol_avail); }
+void dm_qol_set(uint32_t flags, float glider_mult) {
+    uint32_t gbits = 0; memcpy(&gbits, &glider_mult, sizeof gbits);
+    atomic_store_explicit(&g_qol_flags, flags, memory_order_release);
+    atomic_store_explicit(&g_qol_glider_bits, gbits, memory_order_release);
+    uint8_t *st = dm_fps_state;
+    if (st && atomic_load(&g_qol_avail)) {
+        atomic_store_explicit((_Atomic uint32_t *)(st + 0x40), flags, memory_order_release);
+        atomic_store_explicit((_Atomic uint32_t *)(st + 0x44), gbits, memory_order_release);
+    }
+}
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    if (m->fps_state_off + 0x80 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    atomic_store(&g_fps_avail, 1);
+    if (m->qol_mods) atomic_store(&g_qol_avail, 1);
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
@@ -264,14 +308,23 @@ void dm_fps_state_apply(void) {
     dm_pacing_log();   // every game's pacing policy, in one line (dm_pacing.c); main.c calls this once the switches are set
     if (!dm_fps_state) return;
     const char *src; int t = dm_pacing_target(&src);   // dm_pacing.c
-    float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
+    int ov = atomic_load_explicit(&g_fps_override, memory_order_acquire);
+    if (ov != -2) { t = ov; src = "settings.txt"; }
+    fps_state_write(dm_fps_state, t);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    if (atomic_load(&g_qol_avail)) {
+        uint32_t qf = atomic_load_explicit(&g_qol_flags, memory_order_acquire);
+        uint32_t qb = atomic_load_explicit(&g_qol_glider_bits, memory_order_acquire);
+        atomic_store_explicit((_Atomic uint32_t *)(dm_fps_state + 0x40), qf, memory_order_release);
+        atomic_store_explicit((_Atomic uint32_t *)(dm_fps_state + 0x44), qb, memory_order_release);
+        if (qf || qb) { float gm = 1.0f; memcpy(&gm, &qb, sizeof gm); LOG("%s: QoL mods applied (flags=%#x, glider=%.1fx)", g_fps_mod, qf, gm); }
+    }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
-    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", src);
+    LOG("%s: frame step %s%s (%s)", g_fps_mod, t < 0 ? "uncapped (elapsed time, up to 120 fps)" : !t ? "as the game sets it" : "in whole ticks decided by the host", t > 0 ? cap : "", src);
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);

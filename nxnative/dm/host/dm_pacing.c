@@ -12,8 +12,8 @@
 int dm_pacing_target(const char **src) {
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (src) *src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-    if (t != 0 && t != 30 && t != 60) {
-        static int said; if (!said++) PLOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; the game's own frame limit is used", e ? e : "(profile)");
+    if (t != 0 && t != 30 && t != 40 && t != 60) {
+        static int said; if (!said++) PLOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 40 or 60; the game's own frame limit is used", e ? e : "(profile)");
         t = 0;
     }
     return t;
@@ -51,6 +51,6 @@ void dm_pacing_log(void) {
     const char *ts, *hs, *ds; int t = dm_pacing_target(&ts), h = dm_pacing_hold(&hs), d = dm_pacing_display(&ds), ex, a = dm_pacing_adaptive(&ex), pin = dm_pacing_pin();
     static const char *turbo[] = {"off", "on", "auto"};
     PLOG("pacing: target %s (%s), ceiling %d, hold %s (%s), presents %s (%s), governor %s%s, pin %d, step-up p%d, window game rate %s, GPU turbo %s",
-         t ? (t == 30 ? "30 fps" : "60 fps") : "the game's own", ts, dm_pacing_ceiling(), h ? "on" : "off", hs, d ? "on the display's ticks" : "at the game's interval", ds,
+         t ? (t == 30 ? "30 fps" : t == 40 ? "40 fps" : "60 fps") : "the game's own", ts, dm_pacing_ceiling(), h ? "on" : "off", hs, d ? "on the display's ticks" : "at the game's interval", ds,
          a ? "on" : "off", ex ? " (set)" : "", pin, dm_pacing_up_pct(), dm_pacing_window_game_rate() ? "on" : "off", turbo[dm_pacing_turbo()]);
 }

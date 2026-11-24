@@ -28,6 +28,8 @@ class FpsCounterOptions(unittest.TestCase):
 #include "overlay_layout.h"
 static _Atomic int g_fps_opts = FPSO_DEFAULT, g_fps_ver;
 int dm_menu_audio_available(void) { return 1; }
+int dm_qol_available(void) { return 1; }
+int dm_fps_cap_available(void) { return 1; }
 float dm_overlay_scale(void) { return 1; }
 int dm_overlay_off(int l, int c) { (void)l; (void)c; return 0; }
 int dm_overlay_custom(int l, int c, float *x, float *y, float *s) { (void)l; (void)c; (void)x; (void)y; *s = 1; return 0; }
@@ -35,10 +37,10 @@ int dm_overlay_custom(int l, int c, float *x, float *y, float *s) { (void)l; (vo
 static int parse(const char *line) { return fps_opt_parse(line); }
 int main(int argc, char **argv) {
     assert(argc == 2);   // a scratch file in the test's own folder (tmpfile() on MinGW with msvcrt makes it in the drive's root)
-    // four tabs, five rows each; the Counter tab: the five rows (FPS, SOC, BAT, driver, graph); the Style tab: the four choices then a blank
-    assert(OVM_TABS == 4 && OVM_PER_TAB == 5 && OVM_ROWS == 7);
-    assert(ov_menu_item(0, 0) == OVM_TAB && ov_menu_item(3, 6) == OVM_RESUME);
-    assert(ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 5) == OVM_AUDIO);
+    // four tabs, seven rows each; the Counter tab: the five rows (FPS, SOC, BAT, driver, graph) + blanks; the Style tab: the four choices + blanks
+    assert(OVM_TABS == 4 && OVM_PER_TAB == 7 && OVM_ROWS == 9);
+    assert(ov_menu_item(0, 0) == OVM_TAB && ov_menu_item(3, 8) == OVM_RESUME);
+    assert(ov_menu_item(0, 6) == OVM_REMAP && ov_menu_item(0, 7) == OVM_MENU_BTN && ov_menu_item(1, 1) == OVM_FPS && ov_menu_item(1, 3) == OVM_FPS_CAP && ov_menu_item(1, 6) == OVM_AUDIO && ov_menu_item(1, 7) == OVM_MODS);
     const int counter[5] = {OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH}, style[5] = {OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, -1};
     for (int r = 0; r < 5; r++) { assert(ov_menu_item(2, r + 1) == counter[r]); assert(ov_menu_item(3, r + 1) == style[r]); }
     assert(!strcmp(OVM_TAB_NAMES[2], "Counter") && !strcmp(OVM_TAB_NAMES[3], "Style"));

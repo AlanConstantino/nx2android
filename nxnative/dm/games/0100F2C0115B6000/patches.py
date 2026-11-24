@@ -15,20 +15,21 @@ def frame_step(ctx):
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xbd400200,   # ldr s0,[x16]           target fps
               0x1e202008,   # fcmp s0,#0.0
-              0x54000640,   # b.eq off (+50)        target 0: original path
-              0xb9402202,   # ldr w2,[x16,#0x20]     step in vsyncs
-              0x340001a2,   # cbz w2,elapsed (+13)   not decided yet: by the measured frame time
-              0x1e230041,   # ucvtf s1,w2
-              0x1e27d003,   # fmov s3,#30.0
-              0x1e211872,   # fdiv s18,s3,s1
-              0x1e322a52,   # fadd s18,s18,s18       fps = 60 / step
-              0xbd002412,   # str s18,[x0,#0x24]     float fps
+              0x54000660,   # b.eq off (+51)        target 0: original path
+              0xb9402202,   # ldr w2,[x16,#0x20]     step in ticks (60 Hz vsyncs or 120 Hz refreshes)
+              0x340001c2,   # cbz w2,elapsed (+14)   not decided yet: by the measured frame time
+              0xb9402a05,   # ldr w5,[x16,#0x28]     tick hz (0 = 60, 120 = 120 Hz)
+              0x35000045,   # cbnz w5,+2
               0x52800785,   # mov w5,#60
-              0x1ac208a5,   # udiv w5,w5,w2
+              0x1e2300a3,   # ucvtf s3,w5
+              0x1e230041,   # ucvtf s1,w2
+              0x1e211872,   # fdiv s18,s3,s1         float fps = tick_hz / step (exact for 120 / {2,3,4,5,6})
+              0xbd002412,   # str s18,[x0,#0x24]     float fps
+              0x1ac208a5,   # udiv w5,w5,w2          integer fps = tick_hz / step
               0xb9005005,   # str w5,[x0,#0x50]      integer fps
               0xf9401a04,   # ldr x4,[x16,#0x30]
               0x8b224084,   # add x4,x4,w2,uxtw
-              0xf9001a04):  # str x4,[x16,#0x30]     vsyncs stepped
+              0xf9001a04):  # str x4,[x16,#0x30]     ticks stepped (in tick_hz units)
         emit(w)
     emit(B(here(), 0x2db284))                                       # the original epilogue
     for w in (0xf9406c22,   # elapsed: ldr x2,[x1,#0xd8]  last frame time in 19.2 MHz ticks
@@ -138,5 +139,137 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xd5d84))
     fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
+
+    # Live mid-game QoL mods (state +0x40 u32 qol_flags, +0x44 float glider_mult; zero = bit-exact vanilla).
+    # All stubs use x16 as scratch (dead at every site) and preserve NZCV where needed (backpack Korok, Zonai despawn).
+    ldr_qol = 0xB9404210                 # ldr w16, [x16, #0x40]
+    tbz16 = lambda bit, insns: 0x36000010 | ((bit & 31) << 19) | ((insns & 0x3FFF) << 5)
+    tbnz16 = lambda bit, insns: 0x37000010 | ((bit & 31) << 19) | ((insns & 0x3FFF) << 5)
+    cbz_w = lambda rt, insns: 0x34000000 | ((insns & 0x7FFFF) << 5) | rt
+    cbnz_w = lambda rt, insns: 0x35000000 | ((insns & 0x7FFFF) << 5) | rt
+
+    def emit_cbz_w8_bypass(site, orig_hex, hide_tgt, bit, why):
+        fs_site(site, orig_hex)
+        st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        emit(ldr_qol)
+        emit(tbnz16(bit, 3))             # bit on -> show (site + 4)
+        emit(cbnz_w(8, 2))               # vanilla: w8 != 0 -> show (site + 4)
+        emit(B(here(), hide_tgt))        # vanilla: w8 == 0 -> hide
+        emit(B(here(), site + 4))        # show
+        fs_put(site, [B(site, st)], why)
+
+    def emit_bit_swap(site, orig_hex, orig_w, mod_w, bit, why):
+        fs_site(site, orig_hex)
+        st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        emit(ldr_qol)
+        emit(tbz16(bit, 3))              # bit off -> original instruction (preserves NZCV!)
+        emit(mod_w)
+        emit(B(here(), site + 4))
+        emit(orig_w)
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, st)], why)
+
+    # 1. Korok Map (bits 0..1: 0=Off/vanilla, 1=Uncollected only, 2=All; respects map layer & zoom-in)
+    # 1a. main+0x20fc7a4 (ldrb w8, [x20, #0x1d]): mode 2 (All) jumps straight to show (0x20fc85c)
+    fs_site(0x20fc7a4, '88764039')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (ldr_qol,
+              0x12000610,                # and w16, w16, #3
+              0x51000A10,                # sub w16, w16, #2
+              cbnz_w(16, 2)):            # != 2 -> original path
+        emit(w)
+    emit(B(here(), 0x20fc85c))           # mode 2 (All): show Korok
+    emit(0x39407688)                     # ldrb w8, [x20, #0x1d] (original)
+    emit(B(here(), 0x20fc7a8))
+    fs_put(0x20fc7a4, [B(0x20fc7a4, st)], 'QoL: Korok map All mode')
+
+    # 1b. main+0x20fc7fc (regular Koroks, cbnz w8, #0x20fc85c): mode 1 (Uncollected) inverts IsCollected check
+    fs_site(0x20fc7fc, '08030035')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (ldr_qol,
+              0x12000610,                # and w16, w16, #3
+              0x51000610,                # sub w16, w16, #1
+              cbnz_w(16, 3),             # != 1 -> vanilla (+3)
+              cbnz_w(8, 4)):             # mode 1: collected (w8 != 0) -> hide (+4)
+        emit(w)
+    emit(B(here(), 0x20fc85c))           # mode 1: uncollected -> show
+    emit(cbz_w(8, 2))                    # vanilla: w8 == 0 -> hide (+2)
+    emit(B(here(), 0x20fc85c))           # vanilla: collected -> show
+    emit(B(here(), 0x20fc800))           # hide (falls into b 0x20fc724)
+    fs_put(0x20fc7fc, [B(0x20fc7fc, st)], 'QoL: Korok map Uncollected mode (regular Koroks)')
+
+    # 1c. main+0x20fc858 (backpack Koroks, b.ne #0x20fc724): mode 1 inverts EQ/NE without touching NZCV!
+    fs_site(0x20fc858, '61f6ff54')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (ldr_qol,
+              0x12000610,                # and w16, w16, #3 (non-flag-setting)
+              0x51000610,                # sub w16, w16, #1 (non-flag-setting)
+              cbnz_w(16, 3),             # != 1 -> vanilla (+3)
+              0x54000081):               # mode 1: b.ne +4 -> show (uncollected)
+        emit(w)
+    emit(B(here(), 0x20fc724))           # mode 1: EQ (collected) -> hide
+    emit(0x54000040)                     # vanilla: b.eq +2 -> show (collected)
+    emit(B(here(), 0x20fc724))           # vanilla: NE (uncollected) -> hide
+    emit(B(here(), 0x20fc85c))           # show
+    fs_put(0x20fc858, [B(0x20fc858, st)], 'QoL: Korok map Uncollected mode (backpack Koroks)')
+
+    # 2. Show All Shrines & Lightroots (bit 2)
+    emit_cbz_w8_bypass(0x20f6ff0, '48020034', 0x20f7038, 2, 'QoL: show all Shrines & Lightroots on map')
+
+    # 3. Show All Caves, Wells & Chasms (bit 3) — main map icon check + companion zoom/layer check
+    fs_site(0x73644c, '28030035')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    emit(ldr_qol)
+    emit(tbz16(3, 2))                    # bit 3 off -> vanilla
+    emit(B(here(), 0x736500))            # bit 3 on -> skip discovered + secondary flag, keep viewport & layer check
+    emit(cbz_w(8, 2))                    # vanilla: w8 == 0 -> hide (0x736450)
+    emit(B(here(), 0x7364b0))            # vanilla: w8 != 0 -> secondary check
+    emit(B(here(), 0x736450))            # vanilla: hide
+    fs_put(0x73644c, [B(0x73644c, st)], 'QoL: show all Caves, Wells & Chasms on map')
+    emit_cbz_w8_bypass(0x20fa408, '08faff34', 0x20fa348, 3, 'QoL: show all Caves, Wells & Chasms (companion discovered)')
+    emit_cbz_w8_bypass(0x20fa478, '88f6ff34', 0x20fa348, 3, 'QoL: show all Caves, Wells & Chasms (companion secondary)')
+
+    # 4. Show All Dragon Tears (bit 4)
+    emit_cbz_w8_bypass(0x20fd158, 'e8fbff34', 0x20fd0d4, 4, 'QoL: show all Dragon Tears on map')
+
+    # 5. Show All Zonai Dispensers (bit 5)
+    emit_cbz_w8_bypass(0x20fcce4, '88faff34', 0x20fcc34, 5, 'QoL: show all Zonai Dispensers on map')
+
+    # 6. Disable Fog (bit 6): fmov s3, #1.0 -> fmov s3, wzr (0.0f)
+    emit_bit_swap(0x67fcc4, '03102e1e', 0x1E2E1003, 0x1E2703E3, 6, 'QoL: disable fog')
+
+    # 7. No Zonai Despawn (bit 7): fcsel s2, s2, s0, ne -> fmov s2, wzr (NZCV preserved on vanilla path)
+    emit_bit_swap(0x1ccc718, '421c201e', 0x1E201C42, 0x1E2703E2, 7, 'QoL: no Zonai device despawn')
+
+    # 8. Remove 21 Zonai Spawn Limit (bit 8): ldr w8, [x19, #0x10] -> mov w8, #1
+    emit_bit_swap(0x1c0ba70, '681240b9', 0xB9401268, 0x52800028, 8, 'QoL: remove 21 Zonai device spawn limit')
+
+    # 9. Paraglider Speed Boost (state +0x44 float glider_mult; <= 1.0f = vanilla)
+    # Hook inside ExecutePlayerParasailGlide right before horizontal dir multiply; s1, s2, x16, NZCV are all dead here
+    fs_site(0x23f9fc4, 'e10b462d')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xBD404601,                # ldr s1, [x16, #0x44]  glider_mult
+              0x1E2E1002,                # fmov s2, #1.0
+              0x1E222020,                # fcmp s1, s2
+              0x5400004D,                # b.le skip (+2)        0.0 or 1.0: vanilla
+              0x1E210800,                # fmul s0, s0, s1
+              0x2D460BE1):               # skip: ldp s1, s2, [sp, #0x30] (original)
+        emit(w)
+    emit(B(here(), 0x23f9fc8))
+    fs_put(0x23f9fc4, [B(0x23f9fc4, st)], 'QoL: paraglider horizontal speed multiplier (state +0x44)')
+
+    # 10. Infinite Horse Stamina (bit 9): subs w8, w8, #1 -> subs w8, w8, #0 (keeps NZCV valid for b.lt)
+    emit_bit_swap(0x233765c, '08050071', 0x71000508, 0x71000108, 9, 'QoL: infinite horse stamina')
+
+    # 11. Unbreakable Shield for Shield Surfing (bit 10): ShouldShieldSurfTakeDamage returns 0 (like snow/sand)
+    fs_site(0x1b7bb24, '08087fb9')
+    st = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    emit(ldr_qol)
+    emit(tbz16(10, 2))                   # bit 10 off -> vanilla
+    emit(B(here(), 0x1b7bb84))           # bit 10 on -> mov w0, wzr; ret
+    emit(0xB97F0808)                     # ldr w8, [x0, #0x3f08] (original)
+    emit(B(here(), 0x1b7bb28))
+    fs_put(0x1b7bb24, [B(0x1b7bb24, st)], 'QoL: unbreakable shield while shield surfing')
+    ctx.qol_mods = 1
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}

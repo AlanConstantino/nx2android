@@ -25,7 +25,8 @@ int main(void) {
     /* the stub profile: fps_target 0, ceiling 0, hold on, present_interval game */
     assert(dm_pacing_target(&src) == 0 && !strcmp(src, "game profile fps_target"));
     setenv("DM_FPS_TARGET", "60", 1); assert(dm_pacing_target(&src) == 60 && !strcmp(src, "DM_FPS_TARGET"));
-    setenv("DM_FPS_TARGET", "45", 1); assert(dm_pacing_target(NULL) == 0);   /* only 0, 30 or 60 */
+    setenv("DM_FPS_TARGET", "40", 1); assert(dm_pacing_target(&src) == 40 && !strcmp(src, "DM_FPS_TARGET"));
+    setenv("DM_FPS_TARGET", "45", 1); assert(dm_pacing_target(NULL) == 0);   /* only 0, 30, 40 or 60 */
     unsetenv("DM_FPS_TARGET");
     assert(dm_pacing_ceiling() == 0); setenv("DM_FPS_CEILING", "30", 1); assert(dm_pacing_ceiling() == 30); unsetenv("DM_FPS_CEILING");
     assert(dm_pacing_hold(&src) == 1); setenv("DM_FPS_HOLD", "off", 1); assert(dm_pacing_hold(&src) == 0 && !strcmp(src, "DM_FPS_HOLD"));

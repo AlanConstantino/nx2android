@@ -206,8 +206,13 @@ static int g_nshown;
 static _Atomic int g_android_game_mode, g_game_mode_performance;
 static _Atomic int g_fps_pin = -1;
 void dm_perf_game_mode(int mode) { atomic_store(&g_android_game_mode, mode); }   // main-thread onResume; policy changes stay on the presenting thread
+// A game whose frame step the host decides (hle_nvn.c fstep_tick: Tears of the Kingdom, Breath of the Wild) already holds its frames in whole vsyncs by their cost, and its
+// game time follows that hold. A 40 fps step here stretched its hold-1 frames to 25 ms: the frame step counted every one late (1.5 vsyncs against 1.1), stepped up to 30,
+// and each trial or probe back to 60 failed the same way (Tears of the Kingdom on the Retroid Pocket 6, handheld at the first shrine: held at 30 with GPU 7.8-9.7 ms and
+// replay 5.5-6.7 ms a frame, the rate at 40 for good with p90 work 23 ms at the longer hold). So the adaptive rate stands aside while the frame step is on
+__attribute__((weak)) int dm_nvn_frame_step_on(void) { return 0; }
 static int adaptive_enabled(void) {
-    return atomic_load(&g_adapt) && !atomic_load(&g_game_mode_performance);
+    return atomic_load(&g_adapt) && !atomic_load(&g_game_mode_performance) && !dm_nvn_frame_step_on();
 }
 static void game_mode_sync(void) {   // presenting thread only: publish cached policy to guest acquire without environment reads there
     static unsigned frames; static int explicit_override;
@@ -250,6 +255,7 @@ static uint64_t period_adapt(uint64_t period) {
     g_game_period = period;
     if (!period) return period;
     if (!adaptive_enabled()) {
+        { static int said; if (!said && atomic_load(&g_adapt) && dm_nvn_frame_step_on()) { said = 1; LOG("[perf] adaptive frame rate off: the host's frame step decides the holds"); } }
         g_step = fps_cap_step();   // the ceiling's present-thread wait is pacing, not work for ADPF load hints
         return g_step && (uint64_t)STEPS[g_step] > period ? (uint64_t)STEPS[g_step] : period;
     }
