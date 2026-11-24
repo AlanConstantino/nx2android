@@ -27,6 +27,7 @@ class FpsCounterOptions(unittest.TestCase):
 #include <string.h>
 #include "overlay_layout.h"
 static _Atomic int g_fps_opts = FPSO_DEFAULT, g_fps_ver;
+int dm_ui_zh(void) { return 0; }
 int dm_menu_audio_available(void) { return 1; }
 int dm_qol_available(void) { return 1; }
 int dm_fps_cap_available(void) { return 1; }
