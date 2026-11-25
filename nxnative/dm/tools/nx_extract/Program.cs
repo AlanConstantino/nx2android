@@ -247,7 +247,7 @@ static class P {
         return metas;
     }
     // A multi-program title (an update may add a whole second program, e.g. ROMANCE OF THE THREE KINGDOMS 8 REMAKE's 1.1.3, title ID …0001) lists a Program (and Control) entry per index: take the lowest IdOffset (program 0, the game), as Pick takes the lowest title ID on the ordinary path — the list's order need not start at 0
-    static CnmtContentEntry EntryOf(Cnmt m, LibHac.Ncm.ContentType t) => m?.ContentEntries.Where(c => c.Type == t).OrderBy(c => c.IdOffset).FirstOrDefault();
+    static CnmtContentEntry EntryOf(Cnmt m, LibHac.Ncm.ContentType t) => m?.ContentEntries.FirstOrDefault(c => c.Type == t);
 
     // A merged dump ("(1G+1U)"): base game, update and DLC NCAs beside one another in one container. NCA headers cannot pick them: an update's program and control NCAs carry the
     // base game's title ID, so base and update both read …000. The content metas decide: the application CNMT's entries are the base's NCAs, the newest patch CNMT's the update's

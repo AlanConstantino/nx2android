@@ -1,0 +1,7 @@
+# NieR:Automata The End of YoRHa Edition (Asia 1.0.2), PlatinumGames / NVN, SDK 12.3.9.
+status	boots
+package	org.nx2a.nierautomata
+orientation	landscape
+# 256x16 RGBA8 colour LUT is CPU-filled; index-building geometry shaders need the once-only split on Adreno
+env	DM_NVN_CPU_TEX2D_FIRST_USE=1
+env	DM_VK_GS_SPLIT=1

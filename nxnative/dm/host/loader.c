@@ -259,7 +259,8 @@ static _Atomic int g_fps_avail;
 static _Atomic int g_fps_override = -2;   // -2 = unset (env.txt), -1 = uncapped (120 Hz elapsed), 0/30/40/60 = cap
 static _Atomic int g_qol_avail;
 static _Atomic uint32_t g_qol_flags, g_qol_glider_bits, g_qol_ext, g_qol_day_bits = 0x3f800000u;   // (day_mult 1.0f until set)
-int dm_fps_cap_available(void) { return atomic_load(&g_fps_avail); }
+int dm_fps_override(void) { return atomic_load_explicit(&g_fps_override, memory_order_acquire); }
+int dm_fps_cap_available(void) { return atomic_load(&g_fps_avail) || dm_pacing_display(NULL); }
 static void fps_state_write(uint8_t *st, int t) {
     float f = t < 0 ? 120.0f : (float)t;
     uint32_t fbits = 0; memcpy(&fbits, &f, sizeof fbits);
@@ -277,12 +278,10 @@ void dm_fps_target_set(int target_fps) {
     if (target_fps != -2 && target_fps != -1 && target_fps != 0 && target_fps != 30 && target_fps != 40 && target_fps != 60) return;
     int prev = atomic_exchange_explicit(&g_fps_override, target_fps, memory_order_acq_rel);
     uint8_t *st = dm_fps_state;
-    if (st && target_fps != -2) {
-        fps_state_write(st, target_fps);
-        if (prev != target_fps) {
-            if (target_fps < 0) LOG("[nvn] frame rate mode → uncapped (menu)");
-            else LOG("[nvn] frame rate mode → %d fps (menu)", target_fps);
-        }
+    if (st && target_fps != -2) fps_state_write(st, target_fps);
+    if ((st || dm_pacing_display(NULL)) && target_fps != -2 && prev != target_fps) {
+        if (target_fps < 0) LOG("[nvn] frame rate mode → uncapped (menu)");
+        else LOG("[nvn] frame rate mode → %d fps (menu)", target_fps);
     }
 }
 int dm_qol_available(void) { return atomic_load(&g_qol_avail); }

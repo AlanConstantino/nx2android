@@ -1872,10 +1872,15 @@ static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int dm_nvn_frame_step_on(void) { return fstep_on() || fstep_uncapped(); }   // the host decides the holds (or uncapped elapsed mode) — Android's adaptive frame rate stands aside
+int dm_nvn_frame_step_on(void) { return fstep_on() || fstep_uncapped() || (!dm_fps_state && g_display_mode && dm_fps_override() != -2); }   // the host decides the holds (or uncapped elapsed mode / display-mode menu cap) — Android's adaptive frame rate stands aside
 int nvn_game_fps(void) {
     if (fstep_uncapped()) return __atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) ? 30 : 120;
     int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == fstep_hz() / 60 && fstep_on() ? 60 : c;
+    if (!dm_fps_state && g_display_mode) {
+        int ov = dm_fps_override();
+        if (ov == -1) return 120;
+        if (ov == 60 || ov == 40 || ov == 30) return ov;
+    }
     uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60;
 }
 int dm_nvn_frame_held(void) { int c = fps_step_cap(); return fstep_on() && atomic_load(&g_fs_k) > fstep_hz() / (c ? c : 60); }   // frames held longer than the cap's ticks (perf_android.c, DM_GPU_TURBO=need)
@@ -1897,6 +1902,11 @@ static int present_itv(const win_t *o) { int c = fps_step_cap(), k = atomic_load
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
     if (fstep_uncapped()) return __atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED) ? 33333333ull : 0;
+    if (!dm_fps_state && g_display_mode) {
+        int ov = dm_fps_override();
+        if (ov == -1) return 0;
+        if (ov == 60 || ov == 40 || ov == 30) return dm_present_period_adapt(1000000000ull / (uint64_t)ov);
+    }
     int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
     if (want != was) {
         atomic_store(&g_game_itv, want);
