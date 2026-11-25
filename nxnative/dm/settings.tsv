@@ -100,7 +100,7 @@ DM_NVN_DIRTYCHECK	str		debug,ios	?	nvn_mtl.m
 DM_NVN_DISPATCH_OWN	str		debug,ios	?	nvn_mtl.m	
 DM_NVN_ENC_LABEL	bool		debug,ios	?	nvn_mtl.m	
 DM_NVN_ENC_THREAD	bool		debug	?	nvn_rec.h	
-DM_NVN_FB_SNAP	str		debug,ios	?	nvn_mtl.m	
+DM_NVN_FB_SNAP	str		debug	?	nvn_mtl.m, gfx_vk_exec_draws.inc	
 DM_NVN_FLUSH_FILL	int		debug,ios	?	nvn_mtl.m	
 DM_NVN_FRAMES	int		debug	?	hle_nvn.c	
 DM_NVN_FUSE_CHECK	str		debug,ios	?	nvn_mtl.m	
