@@ -139,6 +139,18 @@ static stimg_t g_stimg[3][32]; static int g_stn[3], g_coll_st = -1;
 // barrier, when that draw samples one of the pass's attachments, or a shader of it or of an earlier draw of the pass writes memory (shader_wmem). Attachment writes
 // themselves keep their order inside a pass (primitive order). Off by default: Xenoblade Chronicles 3's characters tore with such barriers kept
 static int g_order_keep, g_order_pending, g_order_check, g_pass_wmem; uint64_t g_order_kept, g_order_ended;   // (kept / ended: gfx_vk_present.c reports them)
+// Same-pass colour feedback snapshots (seedds/nxnative c692ba0): when a draw writes a colour attachment that its fragment stage also samples
+// (or follows a write to it in the same pass), copy that level/layer into a snapshot image and sample the snapshot, reused until the next OP_BARRIER.
+// DM_NVN_FB_SNAP=0 off, all fresh snapshot on every feedback draw, default (1) writers with reuse until barrier.
+static int g_fb_mode = -1;
+static uint64_t g_fb_bar, g_fb_count, g_fb_reuse, g_fb_split;
+static uint32_t g_fb_wmask, g_fb_rmask;
+typedef struct {
+    vkimg_t *src; uint64_t bar, epoch; uint32_t lv, ly, w, h; VkFormat fmt;
+    VkImage img; VkDeviceMemory mem; void *sub;
+    VkImageView view; VkFormat vfmt; VkComponentMapping vswz;
+} fb_cache_t;
+static fb_cache_t g_fbc[8]; static int g_fbc_next;
 static void list_reads(const char *what) {
     if (!g_lst_nrd) return;
     char t[1024]; int k = 0; for (int i = 0; i < g_lst_nrd && k < (int)sizeof t - 24; i++) k += snprintf(t + k, sizeof t - k, " %llx", (unsigned long long)g_lst_rd[i]);

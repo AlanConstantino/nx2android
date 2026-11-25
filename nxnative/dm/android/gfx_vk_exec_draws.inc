@@ -89,6 +89,113 @@ static int order_feedback(int nst) {   // a stage of the draw samples one of the
     }
     return 0;
 }
+static int fb_mode(void) {
+    if (g_fb_mode < 0) {
+        const char *e = getenv("DM_NVN_FB_SNAP");
+        g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
+        if (g_fb_mode != 1) VKLOG("same-pass feedback sampling snapshot: %s (DM_NVN_FB_SNAP)", g_fb_mode ? "fresh on every feedback draw" : "off");
+    }
+    return g_fb_mode;
+}
+static fb_cache_t *fb_cache_find(vkimg_t *src, uint32_t lv, uint32_t ly, VkFormat fmt, uint32_t w, uint32_t h, int force, int *fresh) {
+    fb_cache_t *e = NULL;
+    for (int i = 0; i < 8; i++) if (g_fbc[i].src == src && g_fbc[i].lv == lv && g_fbc[i].ly == ly && g_fbc[i].img) { e = &g_fbc[i]; break; }
+    if (e && e->fmt == fmt && e->w == w && e->h == h && !force && e->bar == g_fb_bar && e->epoch == g_set_epoch) { *fresh = 0; return e; }
+    if (!e) {
+        for (int i = 0; i < 8; i++) if (!g_fbc[i].img) { e = &g_fbc[i]; break; }
+        if (!e) { for (int i = 0; i < 8; i++) if (g_fbc[i].fmt == fmt && g_fbc[i].w == w && g_fbc[i].h == h && (g_fbc[i].bar != g_fb_bar || g_fbc[i].epoch != g_set_epoch)) { e = &g_fbc[i]; break; } }
+        if (!e) { e = &g_fbc[g_fbc_next]; g_fbc_next = (g_fbc_next + 1) & 7; }
+    }
+    *fresh = 1;
+    return e;
+}
+static int fb_prepare(vkshader_t *fs, const pkey *pk) {
+    int mode = fb_mode(); if (!mode) return 1;
+    uint32_t wm = 0;
+    for (int a = 0; a < S.ncol && a < 8; a++) if (pk->wmask[a] && P_att[a].im && P_att[a].im != &g_s0_image) wm |= 1u << a;
+    if (wm & g_fb_rmask) {   // an earlier draw of this pass sampled an attachment directly; split before writing it
+        g_fb_split++; vk_end_pass(); vk_img_barrier_all(vk_cmd());
+        if (!begin_pass() || !pass_commit()) return 0;
+    }
+    for (int i = 0; i < fs->nbind && g_fb_n < 4; i++) {
+        const dmsv_bind *b = &fs->b[i];
+        if (b->kind != RK_TEX && b->kind != RK_TEX_UBO && b->kind != RK_TEX_C2A) continue;
+        int cnt = b->count ? b->count : 1;
+        for (int ci = 0; ci < cnt && g_fb_n < 4; ci++) {
+            uint64_t h = b->kind == RK_TEX ? vk_tex_slot_handle(S.tex[1], S.img[1], (unsigned)b->reg) :
+                         b->kind == RK_TEX_UBO ? mem_handle(ubo_word(1, b->reg, b->off + 8 * ci)) : (b->off >= 0 ? c2_handle(1, b->off + 8 * ci) : 0);
+            int tid = (int)(h & 0xfffff); if (!tid) continue;
+            const view_t *v = NULL; const tex_t *t = NULL;
+            if (!vk_tex_by_id(tid, &v, &t) || !t || !t->pool) continue;
+            uint64_t tpool = (uint64_t)(uintptr_t)t->pool;
+            for (int a = 0; a < S.ncol && a < 8 && g_fb_n < 4; a++) {
+                vkimg_t *aim = P_att[a].im;
+                if (!aim || aim == &g_s0_image || aim->samples != 1 || aim->pool != tpool || aim->off != t->off) continue;
+                int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_sub[q].tid == tid; if (dup) break;
+                uint32_t alv = P_att[a].lv, aly = P_att[a].ly;
+                uint32_t tlvs = t->d.levels ? t->d.levels : 1;
+                uint32_t tlys = (t->d.target == 4 || t->d.target == 9) ? (t->d.depth ? t->d.depth : 1) : (t->d.target == 8 ? 6 : 1);
+                uint32_t slv = v && v->set_levels ? v->base_level : 0;
+                uint32_t snlv = v && v->set_levels && v->nlevels ? v->nlevels : (slv < tlvs ? tlvs - slv : 1);
+                uint32_t sly = v && v->set_layers ? v->min_layer : 0;
+                uint32_t snly = v && v->set_layers && v->nlayers ? v->nlayers : (sly < tlys ? tlys - sly : 1);
+                if (slv + snlv <= alv || slv > alv || sly + snly <= aly || sly > aly) continue;
+                if (mode == 1 && !((wm | g_fb_wmask) >> a & 1)) { g_fb_rmask |= 1u << a; continue; }
+                if (snlv != 1 || snly != 1) continue;   // mip-chain or layer pass
+                uint32_t sw = aim->w >> alv ? aim->w >> alv : 1, sh = aim->h >> alv ? aim->h >> alv : 1;
+                int fresh = 0;
+                fb_cache_t *e = fb_cache_find(aim, alv, aly, aim->fmt, sw, sh, mode == 2, &fresh);
+                if (!e) continue;
+                if (fresh) {
+                    vk_end_pass();
+                    VkCommandBuffer cb2 = vk_cmd();
+                    if (!e->img || e->fmt != aim->fmt || e->w != sw || e->h != sh) {
+                        if (e->view) { vk_defer_free_view(e->view); e->view = VK_NULL_HANDLE; }
+                        if (e->img) { if (e->sub) vk_defer_free_image_sub(e->img, e->sub); else vk_defer_free_image(e->img, e->mem); e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE; e->sub = NULL; }
+                        VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, VK_IMAGE_TYPE_2D, aim->fmt,
+                            {sw, sh, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                            VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+                        if (vkCreateImage(V.dev, &ici, NULL, &e->img)) { e->img = VK_NULL_HANDLE; if (!begin_pass() || !pass_commit()) return 0; continue; }
+                        VkMemoryRequirements mr; vkGetImageMemoryRequirements(V.dev, e->img, &mr); VkDeviceSize moff;
+                        e->mem = vk_image_memory(&mr, vk_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), &moff, &e->sub);
+                        if (!e->mem) { vkDestroyImage(V.dev, e->img, NULL); e->img = VK_NULL_HANDLE; if (!begin_pass() || !pass_commit()) return 0; continue; }
+                        VKCHK(vkBindImageMemory(V.dev, e->img, e->mem, moff));
+                        e->fmt = aim->fmt; e->w = sw; e->h = sh; e->vfmt = VK_FORMAT_UNDEFINED;
+                        VkImageMemoryBarrier nb = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, e->img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+                        vkCmdPipelineBarrier(cb2, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &nb);
+                    }
+                    vk_img_barrier_all(cb2);
+                    VkImageCopy r = {{VK_IMAGE_ASPECT_COLOR_BIT, alv, aly, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {sw, sh, 1}};
+                    vkCmdCopyImage(cb2, aim->img, VK_IMAGE_LAYOUT_GENERAL, e->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+                    vk_img_barrier_all(cb2);
+                    e->src = aim; e->lv = alv; e->ly = aly; e->bar = g_fb_bar; e->epoch = g_set_epoch;
+                    if (!begin_pass() || !pass_commit()) return 0;
+                    g_fb_count++;
+                    if (g_fb_count == 1 || g_fb_count == 10 || g_fb_count == 1000 || g_fb_count % 100000 == 0)
+                        VKLOG("same-pass feedback sampling: snapshot #%llu (reused %llu, splits %llu): frame %llu shader %016llx slot %d attachment %d %ux%u fmt %d",
+                              (unsigned long long)g_fb_count, (unsigned long long)g_fb_reuse, (unsigned long long)g_fb_split, (unsigned long long)g_tex_frame,
+                              (unsigned long long)fs->key, (int)b->reg, a, sw, sh, (int)aim->fmt);
+                } else {
+                    g_fb_reuse++;
+                }
+                VkFormat vfmt; VkComponentMapping vswz;
+                vk_tex_snap_spec(e->fmt, t, v, &vfmt, &vswz);
+                if (!e->view || e->vfmt != vfmt || memcmp(&e->vswz, &vswz, sizeof vswz) != 0) {
+                    if (e->view) vk_defer_free_view(e->view);
+                    VkImageViewUsageCreateInfo uci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, VK_IMAGE_USAGE_SAMPLED_BIT};
+                    VkImageViewCreateInfo vci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &uci, 0, e->img, VK_IMAGE_VIEW_TYPE_2D, vfmt, vswz, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+                    if (vkCreateImageView(V.dev, &vci, NULL, &e->view)) { e->view = VK_NULL_HANDLE; continue; }
+                    e->vfmt = vfmt; e->vswz = vswz;
+                }
+                g_fb_sub[g_fb_n].tid = tid; g_fb_sub[g_fb_n].view = e->view; g_fb_n++;
+                break;
+            }
+        }
+    }
+    g_fb_wmask |= wm;
+    return 1;
+}
 // DM_VK_TEXBIND=<shader key>[,<key>...]: once per matching pipeline, every texture the draw has bound, with the memory it lives in. vk_tex_by_id answers
 // whether a texture is registered and fills the descriptor; the image itself is not made here (making one would upload it): the pool and offset in the
 // descriptor are what DM_VK_TEXDUMP=<pool>+<off> takes to write the texture's content out.
@@ -281,6 +388,9 @@ static int prepare_draw(int prim, int indexed) {
     if (nsets == l_n && !memcmp(dsl, l_in, sizeof l_in)) { memcpy(dsl, l_out, sizeof l_out); layout = l_lay; }
     else { memcpy(l_in, dsl, sizeof l_in); l_n = nsets; layout = l_lay = vk_pipeline_layout(dsl, nsets); memcpy(l_out, dsl, sizeof l_out); }
     // descriptor sets first: the views they are given decide which shader variants the pipeline takes (integer texels, vk_shader_module)
+    g_fb_n = 0;
+    if (S.sh[1] && !k.raster_discard && S.ncol > 0 && !fb_prepare(S.sh[1], &k)) { g_vkst.skip_rt++; return 0; }
+    cb = vk_cmd();
     g_var_now = var;
     VkDescriptorSet sets[5] = {0};
     uint32_t dofs[5][96], ndofs = 0, dall[3 * 96];
@@ -289,6 +399,7 @@ static int prepare_draw(int prim, int indexed) {
         uint64_t m0 = g_set_memo; int n0 = g_stn[st]; g_stn[st] = 0; g_coll_st = st;   // the images it is collected with (vk_watch); a memoized set keeps the last ones
         sets[S.sh[st]->set] = stage_set(st, S.sh[st], dofs[S.sh[st]->set], NULL); k.um[st] = g_num_um; k.im[st] = g_num_im;
         g_coll_st = -1; if (g_set_memo != m0) g_stn[st] = n0; }
+    g_fb_n = 0;
     if (g_order_check) {   // the order-only barrier before this draw (see g_order_keep): kept, or the pass ends here with it
         g_order_check = 0; vkshader_t *fs = k.raster_discard ? NULL : S.sh[1];
         if (g_pass_wmem || shader_wmem(S.sh[0]) || shader_wmem(fs) || shader_wmem(S.sh[2]) || order_feedback(3)) {

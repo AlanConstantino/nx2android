@@ -120,6 +120,7 @@ static VkSampler samp_for(int st, const dmsv_bind *b, uint64_t texh, int nearest
 // locks (NEO: about 2 ms a frame). An entry holds while no texture ID is registered again and no view is dropped (g_tex_gen)
 enum { TVC = 4096 };
 static struct { uint64_t epoch, gen; int tid, dim, arr, num, sc; VkImageView v; vkimg_t *im; } g_tvc[TVC];
+static struct { int tid; VkImageView view; } g_fb_sub[4]; static int g_fb_n;
 uint64_t g_tvc_hit, g_tvc_miss, g_tvc_cold;   // lookups the cache answered, ones it did not, and of those the ones only an older submission's entry would have answered
 // what a view's texels are, as gfx_vk_shader.c's integer-texel variants need it: 0 float, 1 uint (unsigned integer formats, a stencil), 2 int
 static int view_num(const tex_t *t, const view_t *v) {
@@ -144,6 +145,13 @@ static int tex_desc_for(int st, const dmsv_bind *b, uint64_t h, VkDescriptorImag
     int sc = storage ? img_fmt_cls(b->fmt) : 0;   // FINAL FANTASY TACTICS' UI composite declares its window image r32ui over an RGBA8 texture: the view is in the shader's class
     unsigned ck = ((unsigned)tid * 2654435761u ^ (unsigned)b->dim * 97u ^ (unsigned)(b->flags & 1) ^ (unsigned)sc * 0x9E37u) % TVC;
     int logfs = g_x_logfs && S.sh[1] && S.sh[1]->key == g_x_logfs && st == 1; static int nlogfs; if (logfs && nlogfs >= 60) logfs = 0;
+    if (tid && st == 1 && !storage && g_fb_n) {
+        for (int q = 0; q < g_fb_n; q++) if (g_fb_sub[q].tid == tid) {
+            ii->imageView = g_fb_sub[q].view;
+            if (vk_tex_by_id(tid, &v, &t) && t) { int num = view_num(t, v); if (num) ii->sampler = samp_for(st, b, h, 1); return num; }
+            return 0;
+        }
+    }
     if (tid && g_var_now != 3 && !g_tracing && !logfs && g_tvc[ck].epoch == g_set_epoch && g_tvc[ck].gen == g_tex_gen && g_tvc[ck].tid == tid && g_tvc[ck].dim == b->dim && g_tvc[ck].arr == (b->flags & 1) && g_tvc[ck].sc == sc) {
         // (no last_use here: the entry was made in this submission, whose fence the miss below already gave the image; the fence changes only at the commit.
         // Writing it again touched a scattered image record per binding, ~77,000 a frame in Sifu)
@@ -499,7 +507,7 @@ static VkDescriptorSet stage_set(int st, vkshader_t *s, uint32_t *dofs, VkDescri
         if (k == RK_SBUF || k == RK_SBUF_UBO || k == RK_IMG || k == RK_IMG_UBO || k == RK_IMG_TBUF) { vk_readback_unknown(); break; }
         if (d != RD_UBO && d != RD_SAMPLED && d != RD_TBUF && d != RD_IMAGE && d != RD_SAMPLER) { vk_readback_unknown(); break; }
     }
-    int memo = st < 3 && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
+    int memo = st < 3 && !(st == 1 && g_fb_n) && !g_x_nosetmemo && !g_tracing && !g_var_now && !g_x_nosetc && !g_x_nodrvc && !g_ubolog_key && g_td_off < 0 && set_memo_ok(s), verify = 0;
     uint32_t vd[96]; uint64_t vum = 0, vim = 0;   // verify: what the memo gave
     if (!memo) g_memo_why[5]++;
     // the constant buffer descriptors now, unless the last set holds without looking at them (nothing moved since)

@@ -946,6 +946,12 @@ VkImageView vk_tex_view_as(const tex_t *t, const view_t *vw, int dim, int arraye
     vk_view_fmt = fmt; vk_view_layers = nly; vk_view_usage = uci.usage;
     return view;
 }
+void vk_tex_snap_spec(VkFormat img_fmt, const tex_t *t, const view_t *vw, VkFormat *fmt_out, VkComponentMapping *swz_out) {
+    const vkfmt_t *f = vk_fmt(vw && vw->set_format ? vw->format : t->d.format);
+    if (!f) f = vk_fmt(t->d.format);
+    *fmt_out = f ? f->vk : img_fmt;
+    *swz_out = f ? sample_swizzle(&f->swz, t, vw, 0) : (VkComponentMapping){0};
+}
 
 // ---------------- texture / sampler ID tables ----------------
 // A registration as the replay of each submission sees it. NVN's texture pool is memory the GPU reads as it runs, and a game rewrites an ID once the work
